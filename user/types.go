@@ -311,6 +311,7 @@ type Config struct {
 	AccessCacheEnabled           bool                // Enables the in-memory ACL cache (high volume servers only)
 	AccessCacheReloadInterval    time.Duration       // Reload interval for access cache, relevant for ACL writes from CLI
 	ExpiredMagicLinkReapInterval time.Duration       // Interval for sweeping expired email-verify/password-reset links
+	LDAP                         *LDAPConfig         // External LDAP authentication; nil/disabled unless configured
 }
 
 // Error constants used by the package

@@ -55,6 +55,10 @@ var flagsServe = append(
 	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "auth-access", Aliases: []string{"auth_access"}, EnvVars: []string{"NTFY_AUTH_ACCESS"}, Usage: "pre-provisioned declarative access control entries"}),
 	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "auth-tokens", Aliases: []string{"auth_tokens"}, EnvVars: []string{"NTFY_AUTH_TOKENS"}, Usage: "pre-provisioned declarative access tokens"}),
 	altsrc.NewBoolFlag(&cli.BoolFlag{Name: "auth-access-cache", Aliases: []string{"auth_access_cache"}, EnvVars: []string{"NTFY_AUTH_ACCESS_CACHE"}, Value: user.DefaultAccessCacheEnabled, Usage: "enables the in-memory ACL cache (high-volume servers only)"}),
+	altsrc.NewStringFlag(&cli.StringFlag{Name: "auth-ldap-url", Aliases: []string{"auth_ldap_url"}, EnvVars: []string{"NTFY_AUTH_LDAP_URL"}, Usage: "LDAP server URL for authentication, e.g. ldap://host:3890 or ldaps://host:636"}),
+	altsrc.NewStringFlag(&cli.StringFlag{Name: "auth-ldap-bind-dn-template", Aliases: []string{"auth_ldap_bind_dn_template"}, EnvVars: []string{"NTFY_AUTH_LDAP_BIND_DN_TEMPLATE"}, Usage: "LDAP bind DN template with a single %s placeholder for the username, e.g. uid=%s,ou=people,dc=example,dc=com"}),
+	altsrc.NewBoolFlag(&cli.BoolFlag{Name: "auth-ldap-start-tls", Aliases: []string{"auth_ldap_start_tls"}, EnvVars: []string{"NTFY_AUTH_LDAP_START_TLS"}, Usage: "issue StartTLS on a plain ldap:// connection before binding"}),
+	altsrc.NewStringFlag(&cli.StringFlag{Name: "auth-ldap-default-role", Aliases: []string{"auth_ldap_default_role"}, EnvVars: []string{"NTFY_AUTH_LDAP_DEFAULT_ROLE"}, Value: "user", Usage: "role assigned to LDAP users on first login (user or admin)"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-cache-dir", Aliases: []string{"attachment_cache_dir"}, EnvVars: []string{"NTFY_ATTACHMENT_CACHE_DIR"}, Usage: "cache directory for attached files, or S3 URL (s3://ACCESS_KEY:SECRET_KEY@BUCKET[/PREFIX]?region=REGION[&endpoint=ENDPOINT])"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-total-size-limit", Aliases: []string{"attachment_total_size_limit", "A"}, EnvVars: []string{"NTFY_ATTACHMENT_TOTAL_SIZE_LIMIT"}, Value: util.FormatSize(server.DefaultAttachmentTotalSizeLimit), Usage: "limit of the on-disk attachment cache"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-file-size-limit", Aliases: []string{"attachment_file_size_limit", "Y"}, EnvVars: []string{"NTFY_ATTACHMENT_FILE_SIZE_LIMIT"}, Value: util.FormatSize(server.DefaultAttachmentFileSizeLimit), Usage: "per-file attachment size limit (e.g. 300k, 2M, 100M)"}),
@@ -176,6 +180,10 @@ func execServe(c *cli.Context) error {
 	authAccessRaw := c.StringSlice("auth-access")
 	authTokensRaw := c.StringSlice("auth-tokens")
 	authAccessCacheEnabled := c.Bool("auth-access-cache")
+	authLDAPURL := c.String("auth-ldap-url")
+	authLDAPBindDNTemplate := c.String("auth-ldap-bind-dn-template")
+	authLDAPStartTLS := c.Bool("auth-ldap-start-tls")
+	authLDAPDefaultRole := c.String("auth-ldap-default-role")
 	attachmentCacheDir := c.String("attachment-cache-dir")
 	attachmentTotalSizeLimitStr := c.String("attachment-total-size-limit")
 	attachmentFileSizeLimitStr := c.String("attachment-file-size-limit")
@@ -433,6 +441,19 @@ func execServe(c *cli.Context) error {
 		return err
 	}
 
+	// Validate LDAP authentication config
+	if authLDAPURL != "" {
+		if authFile == "" && databaseURL == "" {
+			return errors.New("if auth-ldap-url is set, auth-file or database-url must also be set")
+		}
+		if !strings.Contains(authLDAPBindDNTemplate, "%s") {
+			return errors.New("if auth-ldap-url is set, auth-ldap-bind-dn-template must be set and contain a single '%s' placeholder for the username")
+		}
+		if authLDAPDefaultRole != string(user.RoleUser) && authLDAPDefaultRole != string(user.RoleAdmin) {
+			return errors.New("auth-ldap-default-role must be 'user' or 'admin'")
+		}
+	}
+
 	// Special case: Unset default
 	if listenHTTP == "-" {
 		listenHTTP = ""
@@ -499,6 +520,10 @@ func execServe(c *cli.Context) error {
 	conf.AuthAccess = authAccess
 	conf.AuthTokens = authTokens
 	conf.AuthAccessCacheEnabled = authAccessCacheEnabled
+	conf.AuthLDAPURL = authLDAPURL
+	conf.AuthLDAPBindDNTemplate = authLDAPBindDNTemplate
+	conf.AuthLDAPStartTLS = authLDAPStartTLS
+	conf.AuthLDAPDefaultRole = authLDAPDefaultRole
 	conf.AttachmentCacheDir = attachmentCacheDir
 	conf.AttachmentTotalSizeLimit = attachmentTotalSizeLimit
 	conf.AttachmentFileSizeLimit = attachmentFileSizeLimit

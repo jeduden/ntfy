@@ -269,6 +269,14 @@ func New(conf *Config) (*Server, error) {
 			AccessCacheEnabled:        conf.AuthAccessCacheEnabled,
 			AccessCacheReloadInterval: conf.AuthAccessCacheReloadInterval,
 		}
+		if conf.AuthLDAPURL != "" {
+			authConfig.LDAP = &user.LDAPConfig{
+				URL:            conf.AuthLDAPURL,
+				BindDNTemplate: conf.AuthLDAPBindDNTemplate,
+				StartTLS:       conf.AuthLDAPStartTLS,
+				DefaultRole:    user.Role(conf.AuthLDAPDefaultRole),
+			}
+		}
 		if pool != nil {
 			userManager, err = user.NewPostgresManager(pool, authConfig)
 		} else {

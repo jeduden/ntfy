@@ -137,6 +137,10 @@ type Config struct {
 	AuthStatsQueueWriterInterval         time.Duration
 	AuthAccessCacheEnabled               bool          // Enables the in-memory ACL cache (high volume servers only)
 	AuthAccessCacheReloadInterval        time.Duration // Reload interval for access cache, relevant for ACL writes from CLI
+	AuthLDAPURL                          string        // LDAP server URL for authentication; empty disables LDAP
+	AuthLDAPBindDNTemplate               string        // Bind DN template with a single %s placeholder for the username
+	AuthLDAPStartTLS                     bool          // Issue StartTLS on a plain ldap:// connection before binding
+	AuthLDAPDefaultRole                  string        // Role assigned to LDAP users on first login ("user" or "admin")
 	AttachmentCacheDir                   string
 	AttachmentTotalSizeLimit             int64
 	AttachmentFileSizeLimit              int64
@@ -249,6 +253,7 @@ func NewConfig() *Config {
 		AuthStatsQueueWriterInterval:         user.DefaultUserStatsQueueWriterInterval,
 		AuthAccessCacheEnabled:               user.DefaultAccessCacheEnabled,
 		AuthAccessCacheReloadInterval:        user.DefaultAccessCacheReloadInterval,
+		AuthLDAPDefaultRole:                  string(user.RoleUser),
 		AttachmentCacheDir:                   "",
 		AttachmentTotalSizeLimit:             DefaultAttachmentTotalSizeLimit,
 		AttachmentFileSizeLimit:              DefaultAttachmentFileSizeLimit,

@@ -59,6 +59,7 @@ type Manager struct {
 	statsQueue  map[string]*Stats       // "Queue" to asynchronously write user stats to the database (UserID -> Stats)
 	tokenQueue  map[string]*TokenUpdate // "Queue" to asynchronously write token access stats to the database (Token ID -> TokenUpdate)
 	accessCache *accessCache            // In-memory snapshot of user_access; refreshed by maybeReloadAccessCache after every ACL mutation
+	ldap        ldapAuther              // External LDAP authenticator; nil when LDAP auth is disabled
 	quit        chan struct{}           // Closed by Close() to signal background goroutines to stop
 	mu          sync.Mutex
 }
@@ -85,6 +86,9 @@ func newManager(d *db.DB, queries queries, config *Config) (*Manager, error) {
 		tokenQueue: make(map[string]*TokenUpdate),
 		quit:       make(chan struct{}),
 		queries:    queries,
+	}
+	if config.LDAP != nil && config.LDAP.URL != "" {
+		manager.ldap = newLDAPClient(config.LDAP)
 	}
 	if err := manager.maybeProvisionUsersAccessAndTokens(); err != nil {
 		return nil, err
@@ -156,27 +160,88 @@ func (a *Manager) asyncExpiredMagicLinkReapLoop(interval time.Duration) {
 
 // Authenticate checks a login identifier (a username or a verified primary email) and password, and
 // returns a User if correct and not marked as deleted. The identifier is resolved in a single query
-// via userByNameOrEmail, so a user can log in with either their username or their primary
-// email. The method returns in constant-ish time (one query, one bcrypt compare), regardless of
-// whether the identifier exists or the password is correct or incorrect.
+// via userByNameOrEmail, so a user can log in with either their username or their primary email.
+//
+// Local password users are verified against their bcrypt hash. When LDAP authentication is enabled
+// (see LDAPConfig), users that do not exist locally, and users whose password is externally managed
+// (see ldapUserPasswordHash), are instead verified via an LDAP bind; the first successful LDAP login
+// creates a local, non-provisioned shadow row so that authorization/ACLs keep working. Token auth
+// (AuthenticateToken) and authorization (Authorize) are unaffected and stay entirely local.
+//
+// The method returns in constant-ish time for the local path (one query, one bcrypt compare),
+// regardless of whether the identifier exists or the password is correct or incorrect.
 func (a *Manager) Authenticate(identifier, password string) (*User, error) {
 	if identifier == Everyone {
 		return nil, ErrUnauthenticated
 	}
 	user, err := a.userByNameOrEmail(identifier)
-	if err != nil {
-		log.Tag(tag).Field("user_name", identifier).Err(err).Trace("Authentication of user failed (1)")
-		bcrypt.CompareHashAndPassword([]byte(userAuthIntentionalSlowDownHash), []byte("intentional slow-down to avoid timing attacks"))
-		return nil, ErrUnauthenticated
-	} else if user.Deleted {
+	if err == nil && user.Deleted {
 		log.Tag(tag).Field("user_name", identifier).Trace("Authentication of user failed (2): user marked deleted")
-		bcrypt.CompareHashAndPassword([]byte(userAuthIntentionalSlowDownHash), []byte("intentional slow-down to avoid timing attacks"))
-		return nil, ErrUnauthenticated
-	} else if err := bcrypt.CompareHashAndPassword([]byte(user.Hash), []byte(password)); err != nil {
-		log.Tag(tag).Field("user_name", identifier).Err(err).Trace("Authentication of user failed (3)")
+		authIntentionalSlowDown()
 		return nil, ErrUnauthenticated
 	}
-	return user, nil
+	// Local password users (those with a real bcrypt hash) are verified locally. LDAP-managed
+	// users (sentinel hash) and unknown identifiers fall through to the LDAP bind path below.
+	if err == nil && !isLDAPUser(user) {
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Hash), []byte(password)); err != nil {
+			log.Tag(tag).Field("user_name", identifier).Err(err).Trace("Authentication of user failed (3)")
+			return nil, ErrUnauthenticated
+		}
+		return user, nil
+	}
+	if a.ldap != nil {
+		return a.authenticateLDAP(identifier, password, user)
+	}
+	log.Tag(tag).Field("user_name", identifier).Err(err).Trace("Authentication of user failed (1)")
+	authIntentionalSlowDown()
+	return nil, ErrUnauthenticated
+}
+
+// authIntentionalSlowDown runs a dummy bcrypt comparison to keep failed local authentications
+// roughly constant-time, mitigating username-enumeration timing attacks.
+func authIntentionalSlowDown() {
+	bcrypt.CompareHashAndPassword([]byte(userAuthIntentionalSlowDownHash), []byte("intentional slow-down to avoid timing attacks"))
+}
+
+// isLDAPUser reports whether the given user's password is managed externally via LDAP, as
+// indicated by the sentinel hash stored in its password column. A nil user is not an LDAP user.
+func isLDAPUser(u *User) bool {
+	return u != nil && u.Hash == ldapUserPasswordHash
+}
+
+// authenticateLDAP verifies the password against the configured LDAP server via a bind. On
+// success it ensures a local, non-provisioned shadow user exists (creating one on first login)
+// so that Authorize can resolve the user's role and ACL grants, and returns that user. The
+// existing param is the local row for the identifier, or nil if none exists yet.
+func (a *Manager) authenticateLDAP(identifier, password string, existing *User) (*User, error) {
+	if !AllowedUsername(identifier) {
+		authIntentionalSlowDown()
+		return nil, ErrUnauthenticated
+	}
+	if err := a.ldap.BindUser(identifier, password); err != nil {
+		log.Tag(tag).Field("user_name", identifier).Err(err).Trace("LDAP authentication of user failed")
+		return nil, ErrUnauthenticated
+	}
+	if existing != nil {
+		return existing, nil
+	}
+	if err := a.addLDAPUser(identifier); err != nil && !errors.Is(err, ErrUserExists) {
+		return nil, err
+	}
+	return a.userByNameOrEmail(identifier)
+}
+
+// addLDAPUser creates a local shadow row for an LDAP-authenticated user. The row stores the
+// ldapUserPasswordHash sentinel (so local password auth can never succeed for it) and is marked
+// non-provisioned so the declarative provisioning reconciler never deletes it.
+func (a *Manager) addLDAPUser(username string) error {
+	role := RoleUser
+	if a.config.LDAP != nil && a.config.LDAP.DefaultRole != "" {
+		role = a.config.LDAP.DefaultRole
+	}
+	return db.ExecTx(a.db, func(tx *sql.Tx) error {
+		return a.addUserTx(tx, username, ldapUserPasswordHash, role, false)
+	})
 }
 
 // AuthenticateToken checks if the token exists and returns the associated User if it does.
