@@ -443,6 +443,13 @@ func execServe(c *cli.Context) error {
 
 	// Validate LDAP authentication config
 	if authLDAPURL != "" {
+		ldapURL, perr := url.Parse(authLDAPURL)
+		if perr != nil || (ldapURL.Scheme != "ldap" && ldapURL.Scheme != "ldaps") {
+			return errors.New("auth-ldap-url must be a valid ldap:// or ldaps:// URL")
+		}
+		if authLDAPStartTLS && ldapURL.Scheme == "ldaps" {
+			return errors.New("auth-ldap-start-tls cannot be combined with an ldaps:// URL (TLS is already implicit); use ldap:// with StartTLS, or ldaps:// on its own")
+		}
 		if authFile == "" && databaseURL == "" {
 			return errors.New("if auth-ldap-url is set, auth-file or database-url must also be set")
 		}

@@ -175,6 +175,15 @@ func (a *Manager) Authenticate(identifier, password string) (*User, error) {
 		return nil, ErrUnauthenticated
 	}
 	user, err := a.userByNameOrEmail(identifier)
+	if err != nil && !errors.Is(err, ErrUserNotFound) {
+		// A real error (e.g. a transient database failure) must fail closed: never fall through to
+		// the LDAP path. Otherwise, while a local user's row is briefly unreadable, an attacker who
+		// can bind as a same-named LDAP user would reach authenticateLDAP and, once the read
+		// recovers, be handed the real local account (and its role/ACLs).
+		log.Tag(tag).Field("user_name", identifier).Err(err).Trace("Authentication of user failed (0): lookup error")
+		authIntentionalSlowDown()
+		return nil, ErrUnauthenticated
+	}
 	if err == nil && user.Deleted {
 		log.Tag(tag).Field("user_name", identifier).Trace("Authentication of user failed (2): user marked deleted")
 		authIntentionalSlowDown()
@@ -189,8 +198,14 @@ func (a *Manager) Authenticate(identifier, password string) (*User, error) {
 		}
 		return user, nil
 	}
+	// The identifier is either genuinely unknown (ErrUserNotFound) or an existing LDAP-managed user.
+	// Only these reach LDAP; existing is non-nil only for a known LDAP user.
 	if a.ldap != nil {
-		return a.authenticateLDAP(identifier, password, user)
+		var existing *User
+		if err == nil {
+			existing = user
+		}
+		return a.authenticateLDAP(identifier, password, existing)
 	}
 	log.Tag(tag).Field("user_name", identifier).Err(err).Trace("Authentication of user failed (1)")
 	authIntentionalSlowDown()

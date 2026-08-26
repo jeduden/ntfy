@@ -2,6 +2,7 @@ package user
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -122,6 +123,40 @@ func TestManager_Authenticate_LDAP_DefaultRoleAdmin(t *testing.T) {
 		require.Nil(t, err)
 		require.Equal(t, RoleAdmin, u.Role)
 	})
+}
+
+func TestManager_Authenticate_LDAP_DBErrorFailsClosed(t *testing.T) {
+	// A non-ErrUserNotFound error from the user lookup (here: a closed database) must fail closed and
+	// never consult LDAP. Otherwise an attacker who can bind as a same-named LDAP user could hijack a
+	// local account during a transient DB failure. Uses a file-backed manager (no forEachBackend) so
+	// closing the DB does not race the shared cleanup.
+	a := newTestManagerFromFile(t, filepath.Join(t.TempDir(), "user.db"), "", PermissionDenyAll, bcrypt.MinCost, DefaultUserStatsQueueWriterInterval)
+	fake := &fakeLDAP{creds: map[string]string{"phil": "ldap-pw"}}
+	a.ldap = fake
+	require.Nil(t, a.AddUser("phil", "local-pw", RoleUser, false))
+
+	require.Nil(t, testDB(a).Close()) // force a real (non-NotFound) lookup error
+
+	_, err := a.Authenticate("phil", "ldap-pw")
+	require.Equal(t, ErrUnauthenticated, err)
+	require.Equal(t, 0, fake.binds) // must not fall through to LDAP on a lookup error
+}
+
+func TestLDAPHost(t *testing.T) {
+	cases := []struct {
+		url  string
+		host string
+	}{
+		{"ldap://lldap.example:3890", "lldap.example"},
+		{"ldaps://lldap.example", "lldap.example"},
+		{"ldap://127.0.0.1:389", "127.0.0.1"},
+		{"ldaps://[::1]:636", "::1"},
+	}
+	for _, c := range cases {
+		host, err := ldapHost(c.url)
+		require.Nil(t, err)
+		require.Equal(t, c.host, host)
+	}
 }
 
 func TestLDAPClient_NewClientDefaultsAndEmptyCredentials(t *testing.T) {

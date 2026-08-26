@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/url"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -69,9 +70,25 @@ func (c *ldapClient) BindUser(username, password string) error {
 	defer conn.Close()
 	conn.SetTimeout(c.config.Timeout)
 	if c.config.StartTLS {
-		if err := conn.StartTLS(&tls.Config{MinVersion: tls.VersionTLS12}); err != nil {
+		// go-ldap's StartTLS calls tls.Client, which (unlike tls.Dial) does not auto-populate
+		// ServerName; without it the handshake fails with "either ServerName or InsecureSkipVerify
+		// must be specified". Derive it from the configured URL so the server cert is verified.
+		host, err := ldapHost(c.config.URL)
+		if err != nil {
+			return err
+		}
+		if err := conn.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
 			return err
 		}
 	}
 	return conn.Bind(fmt.Sprintf(c.config.BindDNTemplate, username), password)
+}
+
+// ldapHost returns the hostname component of an LDAP URL, used as the TLS ServerName for StartTLS.
+func ldapHost(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return u.Hostname(), nil
 }
