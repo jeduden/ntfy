@@ -1,0 +1,56 @@
+name: docker
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v[0-9]+.[0-9]+.[0-9]+' ]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  ghcr:
+    runs-on: ubuntu-latest
+    # Fork-only: publishes the LDAP-patched image to this fork's GitHub Container Registry
+    # (ghcr.io/jeduden/ntfy). Upstream releases go to Docker Hub via release.yaml, which is
+    # gated to binwiederhier/ntfy. Uses the built-in GITHUB_TOKEN — no external registry secret.
+    if: github.repository == 'jeduden/ntfy'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Compute image and tags
+        id: meta
+        run: |
+          image="$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          sha="${GITHUB_SHA::7}"
+          # Always publish an immutable per-commit tag; add a moving tag for humans.
+          tags="-t ${image}:sha-${sha}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags="${tags} -t ${image}:${GITHUB_REF_NAME} -t ${image}:latest"
+            version="${GITHUB_REF_NAME}"
+          else
+            tags="${tags} -t ${image}:main"
+            version="main-${sha}"
+          fi
+          {
+            echo "image=${image}"
+            echo "version=${version}"
+            echo "tags=${tags}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build and push image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker build \
+            --file Dockerfile-build \
+            --build-arg VERSION="${{ steps.meta.outputs.version }}" \
+            --build-arg COMMIT="${GITHUB_SHA}" \
+            ${{ steps.meta.outputs.tags }} \
+            .
+          docker push --all-tags "${{ steps.meta.outputs.image }}"
+      - name: Print published tags
+        run: |
+          echo "Published:"
+          echo " - ${{ steps.meta.outputs.image }}:sha-${GITHUB_SHA::7}"
+          echo " - ${{ steps.meta.outputs.image }} (moving: main / tag / latest)"
