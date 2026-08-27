@@ -3,9 +3,16 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   publish-docs:
     runs-on: ubuntu-latest
+    # Upstream-only: this job pushes generated docs into binwiederhier/ntfy-docs.github.io
+    # and needs NTFY_DOCS_PUSH_TOKEN, which forks don't have. Skip it on forks so it
+    # doesn't fail on every push to main.
+    if: github.repository == 'binwiederhier/ntfy'
     steps:
       -
         name: Checkout ntfy code
