@@ -270,11 +270,16 @@ func New(conf *Config) (*Server, error) {
 			AccessCacheReloadInterval: conf.AuthAccessCacheReloadInterval,
 		}
 		if conf.AuthLDAPURL != "" {
+			ldapAccess := make([]user.Grant, 0, len(conf.AuthLDAPAccess))
+			for _, g := range conf.AuthLDAPAccess {
+				ldapAccess = append(ldapAccess, *g)
+			}
 			authConfig.LDAP = &user.LDAPConfig{
 				URL:            conf.AuthLDAPURL,
 				BindDNTemplate: conf.AuthLDAPBindDNTemplate,
 				StartTLS:       conf.AuthLDAPStartTLS,
 				DefaultRole:    user.Role(conf.AuthLDAPDefaultRole),
+				Access:         ldapAccess,
 			}
 		}
 		if pool != nil {

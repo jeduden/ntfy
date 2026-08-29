@@ -205,8 +205,8 @@ func showUsers(c *cli.Context, manager *user.Manager, users []*user.User) error 
 		} else if len(grants) > 0 {
 			for _, grant := range grants {
 				grantProvisioned := ""
-				if grant.Provisioned {
-					grantProvisioned = " (server config)"
+				if label := grant.SourceLabel(); label != "" {
+					grantProvisioned = " (" + label + ")"
 				}
 				if grant.Permission.IsReadWrite() {
 					fmt.Fprintf(c.App.Writer, "- read-write access to topic %s%s\n", grant.TopicPattern, grantProvisioned)

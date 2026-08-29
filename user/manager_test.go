@@ -85,10 +85,10 @@ func TestManager_FullScenario_Default_DenyAll(t *testing.T) {
 		benGrants, err := a.Grants("ben")
 		require.Nil(t, err)
 		require.Equal(t, []Grant{
-			{"everyonewrite", PermissionDenyAll, false},
-			{"mytopic", PermissionReadWrite, false},
-			{"writeme", PermissionWrite, false},
-			{"readme", PermissionRead, false},
+			{"everyonewrite", PermissionDenyAll, false, accessSourceManual},
+			{"mytopic", PermissionReadWrite, false, accessSourceManual},
+			{"writeme", PermissionWrite, false, accessSourceManual},
+			{"readme", PermissionRead, false, accessSourceManual},
 		}, benGrants)
 
 		john, err := a.Authenticate("john", "john")
@@ -100,10 +100,10 @@ func TestManager_FullScenario_Default_DenyAll(t *testing.T) {
 		johnGrants, err := a.Grants("john")
 		require.Nil(t, err)
 		require.Equal(t, []Grant{
-			{"mytopic_deny*", PermissionDenyAll, false},
-			{"mytopic_ro*", PermissionRead, false},
-			{"mytopic*", PermissionReadWrite, false},
-			{"*", PermissionRead, false},
+			{"mytopic_deny*", PermissionDenyAll, false, accessSourceManual},
+			{"mytopic_ro*", PermissionRead, false, accessSourceManual},
+			{"mytopic*", PermissionReadWrite, false, accessSourceManual},
+			{"*", PermissionRead, false, accessSourceManual},
 		}, johnGrants)
 
 		notben, err := a.Authenticate("ben", "this is wrong")
@@ -329,10 +329,10 @@ func TestManager_UserManagement(t *testing.T) {
 		benGrants, err := a.Grants("ben")
 		require.Nil(t, err)
 		require.Equal(t, []Grant{
-			{"everyonewrite", PermissionDenyAll, false},
-			{"mytopic", PermissionReadWrite, false},
-			{"writeme", PermissionWrite, false},
-			{"readme", PermissionRead, false},
+			{"everyonewrite", PermissionDenyAll, false, accessSourceManual},
+			{"mytopic", PermissionReadWrite, false, accessSourceManual},
+			{"writeme", PermissionWrite, false, accessSourceManual},
+			{"readme", PermissionRead, false, accessSourceManual},
 		}, benGrants)
 
 		everyone, err := a.User(Everyone)
@@ -344,8 +344,8 @@ func TestManager_UserManagement(t *testing.T) {
 		everyoneGrants, err := a.Grants(Everyone)
 		require.Nil(t, err)
 		require.Equal(t, []Grant{
-			{"everyonewrite", PermissionReadWrite, false},
-			{"announcements", PermissionRead, false},
+			{"everyonewrite", PermissionReadWrite, false, accessSourceManual},
+			{"announcements", PermissionRead, false, accessSourceManual},
 		}, everyoneGrants)
 
 		// Ben: Before revoking

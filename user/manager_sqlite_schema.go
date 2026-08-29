@@ -60,7 +60,7 @@ const (
 			read INT NOT NULL,
 			write INT NOT NULL,
 			owner_user_id INT,
-			provisioned INT NOT NULL,
+			source TEXT NOT NULL, -- provenance: 'manual' (CLI/API/reservation), 'config' (auth-access), 'ldap' (auth-ldap-access)
 			PRIMARY KEY (user_id, topic),
 			FOREIGN KEY (user_id) REFERENCES user (id) ON DELETE CASCADE,
 		    FOREIGN KEY (owner_user_id) REFERENCES user (id) ON DELETE CASCADE
@@ -114,7 +114,7 @@ const (
 )
 
 const (
-	sqliteCurrentSchemaVersion = 9
+	sqliteCurrentSchemaVersion = 10
 )
 
 // Schema migrations for SQLite
@@ -366,6 +366,29 @@ const (
 		WHERE user_id IN (SELECT id FROM user); -- Drop orphaned rows that the broken foreign key failed to cascade-delete
 		DROP TABLE user_phone_old;
 	`
+
+	// 9 -> 10: Replace user_access.provisioned (boolean) with user_access.source (provenance enum),
+	// so declarative grants attached to runtime-created external (LDAP) users can be told apart from
+	// hand-made CLI grants and reservations. Existing provisioned=1 rows were owned by the config
+	// reconciler ('config'); everything else was runtime data ('manual'). No 'ldap' rows exist yet.
+	sqliteMigrate9To10UpdateQueries = `
+		ALTER TABLE user_access RENAME TO user_access_old;
+		CREATE TABLE user_access (
+			user_id TEXT NOT NULL,
+			topic TEXT NOT NULL,
+			read INT NOT NULL,
+			write INT NOT NULL,
+			owner_user_id INT,
+			source TEXT NOT NULL,
+			PRIMARY KEY (user_id, topic),
+			FOREIGN KEY (user_id) REFERENCES user (id) ON DELETE CASCADE,
+			FOREIGN KEY (owner_user_id) REFERENCES user (id) ON DELETE CASCADE
+		);
+		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, source)
+		SELECT user_id, topic, read, write, owner_user_id, CASE WHEN provisioned = 1 THEN 'config' ELSE 'manual' END
+		FROM user_access_old;
+		DROP TABLE user_access_old;
+	`
 )
 
 var (
@@ -382,6 +405,7 @@ var (
 		6: schema.AsMigrateFunc(sqliteMigrate6To7UpdateQueries),
 		7: schema.AsMigrateFunc(sqliteMigrate7To8UpdateQueries),
 		8: schema.AsMigrateFunc(sqliteMigrate8To9UpdateQueries),
+		9: schema.AsMigrateFunc(sqliteMigrate9To10UpdateQueries),
 	}
 )
 

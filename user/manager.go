@@ -93,6 +93,9 @@ func newManager(d *db.DB, queries queries, config *Config) (*Manager, error) {
 	if err := manager.maybeProvisionUsersAccessAndTokens(); err != nil {
 		return nil, err
 	}
+	if err := manager.maybeReconcileLDAPAccess(); err != nil {
+		return nil, err
+	}
 	if config.AccessCacheEnabled {
 		manager.accessCache = newAccessCache()
 		if err := manager.maybeReloadAccessCache(); err != nil {
@@ -224,10 +227,12 @@ func isLDAPUser(u *User) bool {
 	return u != nil && u.Hash == ldapUserPasswordHash
 }
 
-// authenticateLDAP verifies the password against the configured LDAP server via a bind. On
-// success it ensures a local, non-provisioned shadow user exists (creating one on first login)
-// so that Authorize can resolve the user's role and ACL grants, and returns that user. The
-// existing param is the local row for the identifier, or nil if none exists yet.
+// authenticateLDAP verifies the password against the configured LDAP server via a bind. On success it
+// returns the user's local shadow row. A returning user is returned directly with no database writes:
+// their ACLs already live in user_access (created from config at the last startup reconcile, see
+// maybeReconcileLDAPAccess). A user seen for the first time gets a shadow row created and its
+// auth-ldap-access grants seeded now, since it did not exist at the last startup. The existing param
+// is the local row for the identifier, or nil if none exists yet.
 func (a *Manager) authenticateLDAP(identifier, password string, existing *User) (*User, error) {
 	if !AllowedUsername(identifier) {
 		authIntentionalSlowDown()
@@ -238,17 +243,27 @@ func (a *Manager) authenticateLDAP(identifier, password string, existing *User) 
 		return nil, ErrUnauthenticated
 	}
 	if existing != nil {
-		return existing, nil
+		return existing, nil // Returning user: no writes on the auth path (which runs on every request)
 	}
 	if err := a.addLDAPUser(identifier); err != nil && !errors.Is(err, ErrUserExists) {
 		return nil, err
 	}
-	return a.userByNameOrEmail(identifier)
+	u, err := a.userByNameOrEmail(identifier)
+	if err != nil {
+		return nil, err
+	}
+	// New user (did not exist at the last startup reconcile): seed its auth-ldap-access grants now.
+	// Key on the canonical username u.Name, not identifier, which may be a primary email.
+	if err := a.reconcileLDAPAccess(u.Name); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 // addLDAPUser creates a local shadow row for an LDAP-authenticated user. The row stores the
 // ldapUserPasswordHash sentinel (so local password auth can never succeed for it) and is marked
-// non-provisioned so the declarative provisioning reconciler never deletes it.
+// non-provisioned so the declarative provisioning reconciler never deletes it. ACL grants are not
+// written here; reconcileLDAPAccess owns the user's source='ldap' rows.
 func (a *Manager) addLDAPUser(username string) error {
 	role := RoleUser
 	if a.config.LDAP != nil && a.config.LDAP.DefaultRole != "" {
@@ -257,6 +272,92 @@ func (a *Manager) addLDAPUser(username string) error {
 	return db.ExecTx(a.db, func(tx *sql.Tx) error {
 		return a.addUserTx(tx, username, ldapUserPasswordHash, role, false)
 	})
+}
+
+// reconcileLDAPAccess makes the user's source='ldap' access rows match the current LDAPConfig.Access,
+// atomically: it deletes the user's existing 'ldap' rows and re-inserts the configured grants as
+// 'ldap'. config is the source of truth for these, so entries removed from auth-ldap-access are swept
+// and changed permissions are updated. Both operations touch only source='ldap' rows for this one
+// user: the delete is scoped to source='ldap', and the insert is DO-NOTHING-on-conflict, so a 'manual'
+// row (a CLI grant or a reservation) already holding a topic is left intact and simply wins. No other
+// user, and no 'manual'/'config' row, is affected. The LDAP user must have a shadow row before this
+// is called.
+func (a *Manager) reconcileLDAPAccess(username string) error {
+	err := db.ExecTx(a.db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(a.queries.deleteUserAccessLDAP, username); err != nil {
+			return err
+		}
+		return a.insertLDAPGrantsTx(tx, username)
+	})
+	if err != nil {
+		return err
+	}
+	// Only this user's row set changed; refresh their slice only.
+	return a.maybeReloadAccessCache(username)
+}
+
+// insertLDAPGrantsTx inserts the configured auth-ldap-access grants for one user as source='ldap'
+// rows, within the given transaction. Each insert is collision-safe (DO NOTHING): a topic already held
+// by a manual grant or a reservation keeps that row; the ldap grant is skipped rather than clobbering
+// it. A nil LDAP config is a no-op. Shared by per-user first-login seeding and the startup reconcile.
+func (a *Manager) insertLDAPGrantsTx(tx *sql.Tx, username string) error {
+	if a.config.LDAP == nil {
+		return nil
+	}
+	for _, g := range a.config.LDAP.Access {
+		if _, err := tx.Exec(a.queries.insertLDAPAccess, username, toSQLWildcard(g.TopicPattern), g.Permission.IsRead(), g.Permission.IsWrite()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// maybeReconcileLDAPAccess rebuilds all source='ldap' access rows from the current auth-ldap-access
+// config at startup, for every existing LDAP user. It mirrors how source='config' (auth-access) grants
+// are reconciled: ntfy loads its config only at startup, so a restart is when config changes take
+// effect, and all config-derived rules are deleted and recreated from config at that point. Users that
+// first log in later are seeded on that first login (see authenticateLDAP), so nothing is written on
+// the per-request auth path. This runs before the access cache is populated, so it does not reload it.
+func (a *Manager) maybeReconcileLDAPAccess() error {
+	if a.config.LDAP == nil {
+		return nil
+	}
+	return db.ExecTx(a.db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(a.queries.deleteAllLDAPAccess); err != nil {
+			return err
+		}
+		usernames, err := a.ldapUsernamesTx(tx)
+		if err != nil {
+			return err
+		}
+		for _, username := range usernames {
+			if err := a.insertLDAPGrantsTx(tx, username); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ldapUsernamesTx returns the usernames of all LDAP users (identified by the sentinel password hash).
+func (a *Manager) ldapUsernamesTx(tx *sql.Tx) ([]string, error) {
+	rows, err := tx.Query(a.queries.selectLDAPUsernames, ldapUserPasswordHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	usernames := make([]string, 0)
+	for rows.Next() {
+		var username string
+		if err := rows.Scan(&username); err != nil {
+			return nil, err
+		}
+		usernames = append(usernames, username)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return usernames, nil
 }
 
 // AuthenticateToken checks if the token exists and returns the associated User if it does.
@@ -810,7 +911,7 @@ func (a *Manager) resolvePerms(base, perm Permission) error {
 // owner may either be a user (username), or the system (empty).
 func (a *Manager) AllowAccess(username string, topicPattern string, permission Permission) error {
 	err := db.ExecTx(a.db, func(tx *sql.Tx) error {
-		return a.allowAccessTx(tx, username, topicPattern, permission, false)
+		return a.allowAccessTx(tx, username, topicPattern, permission, accessSourceManual)
 	})
 	if err != nil {
 		return err
@@ -819,13 +920,15 @@ func (a *Manager) AllowAccess(username string, topicPattern string, permission P
 	return a.maybeReloadAccessCache(username)
 }
 
-func (a *Manager) allowAccessTx(tx *sql.Tx, username string, topicPattern string, permission Permission, provisioned bool) error {
+// allowAccessTx upserts a single user_access row. The source argument records the row's provenance
+// (accessSourceManual/Config/Ldap), which governs which reconciler may later sweep it.
+func (a *Manager) allowAccessTx(tx *sql.Tx, username string, topicPattern string, permission Permission, source string) error {
 	if !AllowedUsername(username) && username != Everyone {
 		return ErrInvalidArgument
 	} else if !AllowedTopicPattern(topicPattern) {
 		return ErrInvalidArgument
 	}
-	_, err := tx.Exec(a.queries.upsertUserAccess, username, toSQLWildcard(topicPattern), permission.IsRead(), permission.IsWrite(), "", "", provisioned)
+	_, err := tx.Exec(a.queries.upsertUserAccess, username, toSQLWildcard(topicPattern), permission.IsRead(), permission.IsWrite(), "", "", source)
 	return err
 }
 
@@ -926,9 +1029,9 @@ func (a *Manager) AllGrants() (map[string][]Grant, error) {
 	defer rows.Close()
 	grants := make(map[string][]Grant, 0)
 	for rows.Next() {
-		var userID, topic string
-		var read, write, provisioned bool
-		if err := rows.Scan(&userID, &topic, &read, &write, &provisioned); err != nil {
+		var userID, topic, source string
+		var read, write bool
+		if err := rows.Scan(&userID, &topic, &read, &write, &source); err != nil {
 			return nil, err
 		} else if err := rows.Err(); err != nil {
 			return nil, err
@@ -939,7 +1042,8 @@ func (a *Manager) AllGrants() (map[string][]Grant, error) {
 		grants[userID] = append(grants[userID], Grant{
 			TopicPattern: fromSQLWildcard(topic),
 			Permission:   NewPermission(read, write),
-			Provisioned:  provisioned,
+			Provisioned:  source != accessSourceManual,
+			Source:       source,
 		})
 	}
 	return grants, nil
@@ -954,9 +1058,9 @@ func (a *Manager) Grants(username string) ([]Grant, error) {
 	defer rows.Close()
 	grants := make([]Grant, 0)
 	for rows.Next() {
-		var topic string
-		var read, write, provisioned bool
-		if err := rows.Scan(&topic, &read, &write, &provisioned); err != nil {
+		var topic, source string
+		var read, write bool
+		if err := rows.Scan(&topic, &read, &write, &source); err != nil {
 			return nil, err
 		} else if err := rows.Err(); err != nil {
 			return nil, err
@@ -964,7 +1068,8 @@ func (a *Manager) Grants(username string) ([]Grant, error) {
 		grants = append(grants, Grant{
 			TopicPattern: fromSQLWildcard(topic),
 			Permission:   NewPermission(read, write),
-			Provisioned:  provisioned,
+			Provisioned:  source != accessSourceManual,
+			Source:       source,
 		})
 	}
 	return grants, nil
@@ -994,10 +1099,10 @@ func (a *Manager) AddReservation(username string, topic string, everyone Permiss
 				}
 			}
 		}
-		if _, err := tx.Exec(a.queries.upsertUserAccess, username, toSQLWildcard(topic), true, true, username, username, false); err != nil {
+		if _, err := tx.Exec(a.queries.upsertUserAccess, username, toSQLWildcard(topic), true, true, username, username, accessSourceManual); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(a.queries.upsertUserAccess, Everyone, toSQLWildcard(topic), everyone.IsRead(), everyone.IsWrite(), username, username, false); err != nil {
+		if _, err := tx.Exec(a.queries.upsertUserAccess, Everyone, toSQLWildcard(topic), everyone.IsRead(), everyone.IsWrite(), username, username, accessSourceManual); err != nil {
 			return err
 		}
 		return nil
@@ -1925,7 +2030,7 @@ func (a *Manager) maybeProvisionUsersAccessAndTokens() error {
 // for when there is nothing to provision, avoiding the expensive Users() call.
 func (a *Manager) removeAllProvisioned() error {
 	return db.ExecTx(a.db, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(a.queries.deleteUserAccessProvisioned); err != nil {
+		if _, err := tx.Exec(a.queries.deleteUserAccessConfig); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(a.queries.deleteAllProvisionedTokens); err != nil {
@@ -1990,7 +2095,7 @@ func (a *Manager) maybeProvisionUsers(tx *sql.Tx, provisionUsernames []string, e
 // access time) or do not have dependent resources (such as grants or tokens).
 func (a *Manager) maybeProvisionGrants(tx *sql.Tx) error {
 	// Remove all provisioned grants
-	if _, err := tx.Exec(a.queries.deleteUserAccessProvisioned); err != nil {
+	if _, err := tx.Exec(a.queries.deleteUserAccessConfig); err != nil {
 		return err
 	}
 	// (Re-)add provisioned grants
@@ -2007,7 +2112,7 @@ func (a *Manager) maybeProvisionGrants(tx *sql.Tx) error {
 			if err := a.resetAccessTx(tx, username, grant.TopicPattern); err != nil {
 				return fmt.Errorf("failed to reset access for user %s and topic %s: %v", username, grant.TopicPattern, err)
 			}
-			if err := a.allowAccessTx(tx, username, grant.TopicPattern, grant.Permission, true); err != nil {
+			if err := a.allowAccessTx(tx, username, grant.TopicPattern, grant.Permission, accessSourceConfig); err != nil {
 				return err
 			}
 		}

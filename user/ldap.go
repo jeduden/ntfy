@@ -29,6 +29,7 @@ type LDAPConfig struct {
 	StartTLS       bool          // Whether to issue StartTLS on a plain ldap:// connection before binding
 	DefaultRole    Role          // Role assigned to LDAP users auto-created on first successful login (defaults to RoleUser)
 	Timeout        time.Duration // Dial/bind timeout; defaults to DefaultLDAPTimeout when zero or negative
+	Access         []Grant       // Topic ACL grants seeded for an LDAP user when its shadow row is created on first login
 }
 
 // ldapAuther verifies a username/password pair against an external LDAP server. It is an
@@ -81,7 +82,9 @@ func (c *ldapClient) BindUser(username, password string) error {
 			return err
 		}
 	}
-	return conn.Bind(fmt.Sprintf(c.config.BindDNTemplate, username), password)
+	// Escape the username before substituting it into the bind DN template so a username containing
+	// a DN metacharacter (e.g. '+', which AllowedUsername permits) cannot alter the DN structure.
+	return conn.Bind(fmt.Sprintf(c.config.BindDNTemplate, ldap.EscapeDN(username)), password)
 }
 
 // ldapHost returns the hostname component of an LDAP URL, used as the TLS ServerName for StartTLS.

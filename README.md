@@ -62,6 +62,75 @@ I would be very humbled by your sponsorship. ❤️
 [Install / Self-hosting](https://ntfy.sh/docs/install/) |
 [Building](https://ntfy.sh/docs/develop/)
 
+## Fork additions (jeduden/ntfy)
+
+This fork adds LDAP bind authentication and declarative topic ACLs for LDAP users, on top of upstream ntfy.
+
+### LDAP authentication
+
+Authenticate users against an external LDAP/LLDAP server via a bind. A user who authenticates for the
+first time gets a local, non-provisioned shadow account, so authorization/ACLs work like any other user;
+only the password check is delegated to LDAP.
+
+| Config option / env | Description |
+|---|---|
+| `auth-ldap-url` / `NTFY_AUTH_LDAP_URL` | `ldap://host:3890` or `ldaps://host:636` (enables LDAP auth) |
+| `auth-ldap-bind-dn-template` / `NTFY_AUTH_LDAP_BIND_DN_TEMPLATE` | Bind DN with exactly one `%s` for the username, e.g. `uid=%s,ou=people,dc=example,dc=com` |
+| `auth-ldap-start-tls` / `NTFY_AUTH_LDAP_START_TLS` | Issue StartTLS on a plain `ldap://` connection before binding |
+| `auth-ldap-default-role` / `NTFY_AUTH_LDAP_DEFAULT_ROLE` | Role for LDAP users on first login: `user` (default) or `admin` |
+
+Requires `auth-file` or `database-url`. LDAP users must **not** be listed in `auth-users` (that would give
+them a local password and bypass LDAP).
+
+### Declarative LDAP topic ACLs (`auth-ldap-access`)
+
+Grant topics to LDAP users declaratively from `server.yml`, so access is reproducible and lives in config
+instead of a manual, per-node `ntfy access` step:
+
+```yaml
+auth-ldap-access:
+  - "alerts:ro"     # topic:permission — ro/read-only, rw/read-write, wo/write-only, deny-all
+  - "myteam:rw"
+```
+
+Also settable via `NTFY_AUTH_LDAP_ACCESS`. Requires `auth-ldap-url`. Entries are validated at startup.
+
+**How the rules are stored and reconciled.** Every `user_access` row carries a `source` marking its
+provenance:
+
+| `source` | Origin | Lifecycle |
+|---|---|---|
+| `manual` | `ntfy access` (CLI/API), reservations | Owned by the database — never rewritten by config reconcile |
+| `config` | `auth-access` | Deleted and recreated from config at startup |
+| `ldap`   | `auth-ldap-access` | Deleted and recreated from config at startup, for every existing LDAP user |
+
+ntfy loads `server.yml` only at startup, so **a config change requires a restart**, at which point all
+`config`- and `ldap`-sourced rules are deleted and recreated from config. New LDAP users are seeded on
+their first login. Returning logins perform no database writes (the auth path runs on every request).
+An `auth-ldap-access` grant is applied with insert-if-absent semantics, so it never overwrites a `manual`
+grant or a reservation on the same topic — once an admin runs `ntfy access` on a topic, that rule becomes
+`manual` and stays in the database permanently.
+
+**Authorization precedence.** When several of a user's rules match a topic, exactly one wins, chosen in
+this order:
+
+1. **A specific user beats `Everyone`** (`*`) — a user rule short-circuits any `Everyone` rule.
+2. **Longer (more specific) topic pattern beats shorter.**
+3. **More authoritative `source` beats less** at equal length: `manual` › `config` › `ldap`.
+4. **Write beats read** at equal length and source.
+
+So a `manual` rule (e.g. an admin's `ntfy access` override) wins over an equally-specific `ldap` rule
+regardless of read/write — but a more specific `ldap` rule still beats a broader `manual` one, because
+pattern length is checked first. `source` affects only this tie-break; it is otherwise invisible to
+authorization.
+
+> **Upgrade note.** Step 3 (source tie-break) is new. On an existing install it also changes how an
+> equal-length `manual` and `config` (`auth-access`) grant for the same user resolve: previously the
+> read/write rule won, now the more authoritative source wins first (`manual` › `config`). Concretely,
+> an admin's `ntfy access` rule now beats an equal-length `auth-access` rule regardless of read/write.
+> Grants of different pattern lengths are unaffected, as is any install without overlapping equal-length
+> rules from different sources.
+
 ## Chat/forum
 There are a few ways to get in touch with me and/or the rest of the community. Feel free to use any of these methods. Whatever
 works best for you:

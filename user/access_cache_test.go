@@ -274,10 +274,11 @@ func TestACLCache_ConcurrentLookupAndReload(t *testing.T) {
 // rawACLRow models the rows that reload would Scan from the DB but avoids
 // actually opening a DB for these unit tests.
 type rawACLRow struct {
-	user  string
-	topic string
-	read  bool
-	write bool
+	user   string
+	topic  string
+	read   bool
+	write  bool
+	source string // "" ranks as ldap/unknown (rank 2); set explicitly to test source priority
 }
 
 // loadCache writes the given rows into the cache under its write lock,
@@ -287,7 +288,7 @@ func loadCache(t *testing.T, c *accessCache, rows []rawACLRow) {
 	exact := make(map[string]map[string]aclEntry)
 	wildcards := make(map[string][]aclEntry)
 	for _, r := range rows {
-		e := aclEntry{length: len(r.topic), read: r.read, write: r.write}
+		e := aclEntry{length: len(r.topic), read: r.read, write: r.write, sourceRank: accessSourceRank(r.source)}
 		if strings.Contains(r.topic, "%") {
 			e.pattern = mustCompileLikeToRegex(t, r.topic)
 			wildcards[r.user] = append(wildcards[r.user], e)
@@ -309,4 +310,29 @@ func mustCompileLikeToRegex(t *testing.T, pattern string) *regexp.Regexp {
 	r, err := compileLikeToRegex(pattern)
 	require.NoError(t, err)
 	return r
+}
+
+// TestAccessCache_SourceBreaksTieAboveWrite verifies that, at equal pattern length, the more
+// authoritative source wins BEFORE the write-beats-read tie-break: a manual read-only rule beats an
+// ldap read-write rule matching the same topic.
+func TestAccessCache_SourceBreaksTieAboveWrite(t *testing.T) {
+	c := newAccessCache()
+	loadCache(t, c, []rawACLRow{
+		{user: "phil", topic: "alerts", read: true, write: true, source: accessSourceLDAP},    // exact, len 6
+		{user: "phil", topic: "alert%", read: true, write: false, source: accessSourceManual}, // wildcard, len 6
+	})
+	read, write, found := c.Lookup("phil", "alerts")
+	require.True(t, found)
+	require.True(t, read)
+	require.False(t, write) // manual (rank 0) wins the equal-length tie over ldap (rank 2), before write
+
+	// Sanity: with both rules ldap, the old write-beats-read tie-break still applies.
+	c2 := newAccessCache()
+	loadCache(t, c2, []rawACLRow{
+		{user: "phil", topic: "alerts", read: true, write: true, source: accessSourceLDAP},
+		{user: "phil", topic: "alert%", read: true, write: false, source: accessSourceLDAP},
+	})
+	_, write, found = c2.Lookup("phil", "alerts")
+	require.True(t, found)
+	require.True(t, write) // equal length, equal source -> write wins
 }

@@ -53,7 +53,7 @@ const (
 			read BOOLEAN NOT NULL,
 			write BOOLEAN NOT NULL,
 			owner_user_id TEXT REFERENCES "user"(id) ON DELETE CASCADE,
-			provisioned BOOLEAN NOT NULL,
+			source TEXT NOT NULL, -- provenance: 'manual' (CLI/API/reservation), 'config' (auth-access), 'ldap' (auth-ldap-access)
 			PRIMARY KEY (user_id, topic)
 		);
 		CREATE TABLE IF NOT EXISTS user_token (
@@ -96,7 +96,7 @@ const (
 )
 
 const (
-	postgresCurrentSchemaVersion = 9
+	postgresCurrentSchemaVersion = 10
 )
 
 const (
@@ -125,6 +125,16 @@ const (
 		);
 		CREATE INDEX idx_magic_link_user_kind ON user_magic_link (user_id, kind);
 	`
+
+	// 9 -> 10: Replace user_access.provisioned (boolean) with user_access.source (provenance enum).
+	// Existing provisioned=TRUE rows were owned by the config reconciler ('config'); the rest were
+	// runtime data ('manual'). No 'ldap' rows exist yet. See the SQLite migration for the rationale.
+	postgresMigrate9To10UpdateQueries = `
+		ALTER TABLE user_access ADD COLUMN source TEXT;
+		UPDATE user_access SET source = CASE WHEN provisioned THEN 'config' ELSE 'manual' END;
+		ALTER TABLE user_access ALTER COLUMN source SET NOT NULL;
+		ALTER TABLE user_access DROP COLUMN provisioned;
+	`
 )
 
 var (
@@ -136,5 +146,6 @@ var (
 		6: schema.AsMigrateFunc(postgresMigrate6To7UpdateQueries),
 		7: schema.AsMigrateFunc(postgresMigrate7To8UpdateQueries),
 		8: schema.NopMigrateFunc, // 8 -> 9 repairs a SQLite-only foreign key defect; nothing to do on Postgres
+		9: schema.AsMigrateFunc(postgresMigrate9To10UpdateQueries),
 	}
 )

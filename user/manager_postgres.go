@@ -68,6 +68,7 @@ const (
 	`
 	postgresSelectUserCountQuery          = `SELECT COUNT(*) FROM "user"`
 	postgresSelectUserIDFromUsernameQuery = `SELECT id FROM "user" WHERE user_name = $1`
+	postgresSelectLDAPUsernamesQuery      = `SELECT user_name FROM "user" WHERE pass = $1` // LDAP users: identified by the sentinel password hash
 	postgresInsertUserQuery               = `INSERT INTO "user" (id, user_name, pass, role, sync_topic, provisioned, created) VALUES ($1, $2, $3, $4, $5, $6, $7)`
 	postgresUpdateUserPassQuery           = `UPDATE "user" SET pass = $1 WHERE user_name = $2`
 	postgresUpdateUserRoleQuery           = `UPDATE "user" SET role = $1 WHERE user_name = $2`
@@ -88,20 +89,20 @@ const (
 		FROM user_access a
 		JOIN "user" u ON u.id = a.user_id
 		WHERE (u.user_name = $1 OR u.user_name = $2) AND $3 LIKE a.topic ESCAPE '\'
-		ORDER BY u.user_name DESC, LENGTH(a.topic) DESC, CASE WHEN a.write THEN 1 ELSE 0 END DESC
+		ORDER BY u.user_name DESC, LENGTH(a.topic) DESC, CASE a.source WHEN 'manual' THEN 0 WHEN 'config' THEN 1 ELSE 2 END, CASE WHEN a.write THEN 1 ELSE 0 END DESC
 	`
 	postgresSelectAccessCacheAllQuery = `
-		SELECT u.user_name, a.topic, a.read, a.write
+		SELECT u.user_name, a.topic, a.read, a.write, a.source
 		FROM user_access a
 		JOIN "user" u ON u.id = a.user_id
 	`
 	postgresSelectUserAllAccessQuery = `
-		SELECT user_id, topic, read, write, provisioned
+		SELECT user_id, topic, read, write, source
 		FROM user_access
 		ORDER BY LENGTH(topic) DESC, CASE WHEN write THEN 1 ELSE 0 END DESC, CASE WHEN read THEN 1 ELSE 0 END DESC, topic
 	`
 	postgresSelectUserAccessQuery = `
-		SELECT topic, read, write, provisioned
+		SELECT topic, read, write, source
 		FROM user_access
 		WHERE user_id = (SELECT id FROM "user" WHERE user_name = $1)
 		ORDER BY LENGTH(topic) DESC, CASE WHEN write THEN 1 ELSE 0 END DESC, CASE WHEN read THEN 1 ELSE 0 END DESC, topic
@@ -140,7 +141,7 @@ const (
 		  AND (owner_user_id IS NULL OR owner_user_id != (SELECT id FROM "user" WHERE user_name = $3))
 	`
 	postgresUpsertUserAccessQuery = `
-		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, provisioned)
+		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, source)
 		VALUES (
 			(SELECT id FROM "user" WHERE user_name = $1),
 			$2,
@@ -150,15 +151,24 @@ const (
 			$7
 		)
 		ON CONFLICT (user_id, topic)
-		DO UPDATE SET read=excluded.read, write=excluded.write, owner_user_id=excluded.owner_user_id, provisioned=excluded.provisioned
+		DO UPDATE SET read=excluded.read, write=excluded.write, owner_user_id=excluded.owner_user_id, source=excluded.source
 	`
 	postgresDeleteUserAccessQuery = `
 		DELETE FROM user_access
 		WHERE user_id = (SELECT id FROM "user" WHERE user_name = $1)
 		   OR owner_user_id = (SELECT id FROM "user" WHERE user_name = $2)
 	`
-	postgresDeleteUserAccessProvisionedQuery = `DELETE FROM user_access WHERE provisioned = true`
-	postgresDeleteTopicAccessQuery           = `
+	postgresDeleteUserAccessConfigQuery = `DELETE FROM user_access WHERE source = 'config'`
+	postgresDeleteUserAccessLDAPQuery   = `DELETE FROM user_access WHERE source = 'ldap' AND user_id = (SELECT id FROM "user" WHERE user_name = $1)`
+	postgresDeleteAllLDAPAccessQuery    = `DELETE FROM user_access WHERE source = 'ldap'`
+	// Seeds one source='ldap' row. DO NOTHING on conflict so an existing non-ldap row (a manual CLI
+	// grant or a reservation, which owns owner_user_id) for the same (user, topic) is never clobbered.
+	postgresInsertLDAPAccessQuery = `
+		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, source)
+		VALUES ((SELECT id FROM "user" WHERE user_name = $1), $2, $3, $4, NULL, 'ldap')
+		ON CONFLICT (user_id, topic) DO NOTHING
+	`
+	postgresDeleteTopicAccessQuery = `
 		DELETE FROM user_access
 	   	WHERE (user_id = (SELECT id FROM "user" WHERE user_name = $1) OR owner_user_id = (SELECT id FROM "user" WHERE user_name = $2))
 	   	  AND topic = $3
@@ -257,7 +267,7 @@ const (
 // with a "$1, $2, ..." IN clause sized for n usernames.
 func postgresSelectAccessCacheUsersQuery(n int) string {
 	var sb strings.Builder
-	sb.WriteString(`SELECT u.user_name, a.topic, a.read, a.write FROM user_access a JOIN "user" u ON u.id = a.user_id WHERE u.user_name IN (`)
+	sb.WriteString(`SELECT u.user_name, a.topic, a.read, a.write, a.source FROM user_access a JOIN "user" u ON u.id = a.user_id WHERE u.user_name IN (`)
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			sb.WriteString(",")
@@ -304,7 +314,11 @@ var postgresQueries = queries{
 	selectOtherAccessCount:         postgresSelectOtherAccessCountQuery,
 	upsertUserAccess:               postgresUpsertUserAccessQuery,
 	deleteUserAccess:               postgresDeleteUserAccessQuery,
-	deleteUserAccessProvisioned:    postgresDeleteUserAccessProvisionedQuery,
+	deleteUserAccessConfig:         postgresDeleteUserAccessConfigQuery,
+	deleteUserAccessLDAP:           postgresDeleteUserAccessLDAPQuery,
+	deleteAllLDAPAccess:            postgresDeleteAllLDAPAccessQuery,
+	insertLDAPAccess:               postgresInsertLDAPAccessQuery,
+	selectLDAPUsernames:            postgresSelectLDAPUsernamesQuery,
 	deleteTopicAccess:              postgresDeleteTopicAccessQuery,
 	deleteAllAccess:                postgresDeleteAllAccessQuery,
 	selectToken:                    postgresSelectTokenQuery,

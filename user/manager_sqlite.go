@@ -72,6 +72,7 @@ const (
 	`
 	sqliteSelectUserCountQuery          = `SELECT COUNT(*) FROM user`
 	sqliteSelectUserIDFromUsernameQuery = `SELECT id FROM user WHERE user = ?`
+	sqliteSelectLDAPUsernamesQuery      = `SELECT user FROM user WHERE pass = ?` // LDAP users: identified by the sentinel password hash
 	sqliteInsertUserQuery               = `INSERT INTO user (id, user, pass, role, sync_topic, provisioned, created) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	sqliteUpdateUserPassQuery           = `UPDATE user SET pass = ? WHERE user = ?`
 	sqliteUpdateUserRoleQuery           = `UPDATE user SET role = ? WHERE user = ?`
@@ -92,20 +93,20 @@ const (
 		FROM user_access a
 		JOIN user u ON u.id = a.user_id
 		WHERE (u.user = ? OR u.user = ?) AND ? LIKE a.topic ESCAPE '\'
-		ORDER BY u.user DESC, LENGTH(a.topic) DESC, a.write DESC
+		ORDER BY u.user DESC, LENGTH(a.topic) DESC, CASE a.source WHEN 'manual' THEN 0 WHEN 'config' THEN 1 ELSE 2 END, a.write DESC
 	`
 	sqliteSelectAccessCacheAllQuery = `
-		SELECT u.user, a.topic, a.read, a.write
+		SELECT u.user, a.topic, a.read, a.write, a.source
 		FROM user_access a
 		JOIN user u ON u.id = a.user_id
 	`
 	sqliteSelectUserAllAccessQuery = `
-		SELECT user_id, topic, read, write, provisioned
+		SELECT user_id, topic, read, write, source
 		FROM user_access
 		ORDER BY LENGTH(topic) DESC, write DESC, read DESC, topic
 	`
 	sqliteSelectUserAccessQuery = `
-		SELECT topic, read, write, provisioned
+		SELECT topic, read, write, source
 		FROM user_access
 		WHERE user_id = (SELECT id FROM user WHERE user = ?)
 		ORDER BY LENGTH(topic) DESC, write DESC, read DESC, topic
@@ -144,18 +145,27 @@ const (
 		  AND (owner_user_id IS NULL OR owner_user_id != (SELECT id FROM user WHERE user = ?))
 	`
 	sqliteUpsertUserAccessQuery = `
-		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, provisioned)
+		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, source)
 		VALUES ((SELECT id FROM user WHERE user = ?), ?, ?, ?, (SELECT IIF(?='',NULL,(SELECT id FROM user WHERE user=?))), ?)
 		ON CONFLICT (user_id, topic)
-		DO UPDATE SET read=excluded.read, write=excluded.write, owner_user_id=excluded.owner_user_id, provisioned=excluded.provisioned
+		DO UPDATE SET read=excluded.read, write=excluded.write, owner_user_id=excluded.owner_user_id, source=excluded.source
 	`
 	sqliteDeleteUserAccessQuery = `
 		DELETE FROM user_access
 		WHERE user_id = (SELECT id FROM user WHERE user = ?)
 		   OR owner_user_id = (SELECT id FROM user WHERE user = ?)
 	`
-	sqliteDeleteUserAccessProvisionedQuery = `DELETE FROM user_access WHERE provisioned = 1`
-	sqliteDeleteTopicAccessQuery           = `
+	sqliteDeleteUserAccessConfigQuery = `DELETE FROM user_access WHERE source = 'config'`
+	sqliteDeleteUserAccessLDAPQuery   = `DELETE FROM user_access WHERE source = 'ldap' AND user_id = (SELECT id FROM user WHERE user = ?)`
+	sqliteDeleteAllLDAPAccessQuery    = `DELETE FROM user_access WHERE source = 'ldap'`
+	// Seeds one source='ldap' row. DO NOTHING on conflict so an existing non-ldap row (a manual CLI
+	// grant or a reservation, which owns owner_user_id) for the same (user, topic) is never clobbered.
+	sqliteInsertLDAPAccessQuery = `
+		INSERT INTO user_access (user_id, topic, read, write, owner_user_id, source)
+		VALUES ((SELECT id FROM user WHERE user = ?), ?, ?, ?, NULL, 'ldap')
+		ON CONFLICT (user_id, topic) DO NOTHING
+	`
+	sqliteDeleteTopicAccessQuery = `
 		DELETE FROM user_access
 	   	WHERE (user_id = (SELECT id FROM user WHERE user = ?) OR owner_user_id = (SELECT id FROM user WHERE user = ?))
 	   	  AND topic = ?
@@ -254,7 +264,7 @@ const (
 // with a "?, ?, ..." IN clause sized for n usernames.
 func sqliteSelectAccessCacheUsersQuery(n int) string {
 	var sb strings.Builder
-	sb.WriteString(`SELECT u.user, a.topic, a.read, a.write FROM user_access a JOIN user u ON u.id = a.user_id WHERE u.user IN (`)
+	sb.WriteString(`SELECT u.user, a.topic, a.read, a.write, a.source FROM user_access a JOIN user u ON u.id = a.user_id WHERE u.user IN (`)
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			sb.WriteString(",")
@@ -300,7 +310,11 @@ var sqliteQueries = queries{
 	selectOtherAccessCount:         sqliteSelectOtherAccessCountQuery,
 	upsertUserAccess:               sqliteUpsertUserAccessQuery,
 	deleteUserAccess:               sqliteDeleteUserAccessQuery,
-	deleteUserAccessProvisioned:    sqliteDeleteUserAccessProvisionedQuery,
+	deleteUserAccessConfig:         sqliteDeleteUserAccessConfigQuery,
+	deleteUserAccessLDAP:           sqliteDeleteUserAccessLDAPQuery,
+	deleteAllLDAPAccess:            sqliteDeleteAllLDAPAccessQuery,
+	insertLDAPAccess:               sqliteInsertLDAPAccessQuery,
+	selectLDAPUsernames:            sqliteSelectLDAPUsernamesQuery,
 	deleteTopicAccess:              sqliteDeleteTopicAccessQuery,
 	deleteAllAccess:                sqliteDeleteAllAccessQuery,
 	selectToken:                    sqliteSelectTokenQuery,

@@ -141,6 +141,7 @@ type Config struct {
 	AuthLDAPBindDNTemplate               string        // Bind DN template with a single %s placeholder for the username
 	AuthLDAPStartTLS                     bool          // Issue StartTLS on a plain ldap:// connection before binding
 	AuthLDAPDefaultRole                  string        // Role assigned to LDAP users on first login ("user" or "admin")
+	AuthLDAPAccess                       []*user.Grant // Topic ACL grants seeded for an LDAP user on first login (when its shadow row is created)
 	AttachmentCacheDir                   string
 	AttachmentTotalSizeLimit             int64
 	AttachmentFileSizeLimit              int64

@@ -59,6 +59,7 @@ var flagsServe = append(
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "auth-ldap-bind-dn-template", Aliases: []string{"auth_ldap_bind_dn_template"}, EnvVars: []string{"NTFY_AUTH_LDAP_BIND_DN_TEMPLATE"}, Usage: "LDAP bind DN template with a single %s placeholder for the username, e.g. uid=%s,ou=people,dc=example,dc=com"}),
 	altsrc.NewBoolFlag(&cli.BoolFlag{Name: "auth-ldap-start-tls", Aliases: []string{"auth_ldap_start_tls"}, EnvVars: []string{"NTFY_AUTH_LDAP_START_TLS"}, Usage: "issue StartTLS on a plain ldap:// connection before binding"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "auth-ldap-default-role", Aliases: []string{"auth_ldap_default_role"}, EnvVars: []string{"NTFY_AUTH_LDAP_DEFAULT_ROLE"}, Value: "user", Usage: "role assigned to LDAP users on first login (user or admin)"}),
+	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "auth-ldap-access", Aliases: []string{"auth_ldap_access"}, EnvVars: []string{"NTFY_AUTH_LDAP_ACCESS"}, Usage: "topic:permission ACL grants seeded for an LDAP user on first login"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-cache-dir", Aliases: []string{"attachment_cache_dir"}, EnvVars: []string{"NTFY_ATTACHMENT_CACHE_DIR"}, Usage: "cache directory for attached files, or S3 URL (s3://ACCESS_KEY:SECRET_KEY@BUCKET[/PREFIX]?region=REGION[&endpoint=ENDPOINT])"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-total-size-limit", Aliases: []string{"attachment_total_size_limit", "A"}, EnvVars: []string{"NTFY_ATTACHMENT_TOTAL_SIZE_LIMIT"}, Value: util.FormatSize(server.DefaultAttachmentTotalSizeLimit), Usage: "limit of the on-disk attachment cache"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-file-size-limit", Aliases: []string{"attachment_file_size_limit", "Y"}, EnvVars: []string{"NTFY_ATTACHMENT_FILE_SIZE_LIMIT"}, Value: util.FormatSize(server.DefaultAttachmentFileSizeLimit), Usage: "per-file attachment size limit (e.g. 300k, 2M, 100M)"}),
@@ -184,6 +185,7 @@ func execServe(c *cli.Context) error {
 	authLDAPBindDNTemplate := c.String("auth-ldap-bind-dn-template")
 	authLDAPStartTLS := c.Bool("auth-ldap-start-tls")
 	authLDAPDefaultRole := c.String("auth-ldap-default-role")
+	authLDAPAccessRaw := c.StringSlice("auth-ldap-access")
 	attachmentCacheDir := c.String("attachment-cache-dir")
 	attachmentTotalSizeLimitStr := c.String("attachment-total-size-limit")
 	attachmentFileSizeLimitStr := c.String("attachment-file-size-limit")
@@ -440,6 +442,10 @@ func execServe(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	authLDAPAccess, err := parseLDAPAccess(authLDAPAccessRaw)
+	if err != nil {
+		return err
+	}
 
 	// Validate LDAP authentication config
 	if authLDAPURL != "" {
@@ -453,12 +459,14 @@ func execServe(c *cli.Context) error {
 		if authFile == "" && databaseURL == "" {
 			return errors.New("if auth-ldap-url is set, auth-file or database-url must also be set")
 		}
-		if !strings.Contains(authLDAPBindDNTemplate, "%s") {
-			return errors.New("if auth-ldap-url is set, auth-ldap-bind-dn-template must be set and contain a single '%s' placeholder for the username")
+		if strings.Count(authLDAPBindDNTemplate, "%s") != 1 || strings.Count(authLDAPBindDNTemplate, "%") != 1 {
+			return errors.New("if auth-ldap-url is set, auth-ldap-bind-dn-template must be set and contain exactly one '%s' placeholder for the username (and no other '%' verb)")
 		}
 		if authLDAPDefaultRole != string(user.RoleUser) && authLDAPDefaultRole != string(user.RoleAdmin) {
 			return errors.New("auth-ldap-default-role must be 'user' or 'admin'")
 		}
+	} else if len(authLDAPAccess) > 0 {
+		return errors.New("auth-ldap-access requires auth-ldap-url to be set")
 	}
 
 	// Special case: Unset default
@@ -531,6 +539,7 @@ func execServe(c *cli.Context) error {
 	conf.AuthLDAPBindDNTemplate = authLDAPBindDNTemplate
 	conf.AuthLDAPStartTLS = authLDAPStartTLS
 	conf.AuthLDAPDefaultRole = authLDAPDefaultRole
+	conf.AuthLDAPAccess = authLDAPAccess
 	conf.AttachmentCacheDir = attachmentCacheDir
 	conf.AttachmentTotalSizeLimit = attachmentTotalSizeLimit
 	conf.AttachmentFileSizeLimit = attachmentFileSizeLimit
@@ -717,6 +726,39 @@ func parseAccess(users []*user.User, accessRaw []string) (map[string][]*user.Gra
 		})
 	}
 	return access, nil
+}
+
+// parseLDAPAccess parses the auth-ldap-access entries, each of the form "topic:permission", into
+// grants seeded for an LDAP user when its shadow row is created on first login. Unlike auth-access,
+// no username is given (the grants are user-agnostic), and there is no provisioned user to validate against.
+func parseLDAPAccess(accessRaw []string) ([]*user.Grant, error) {
+	grants := make([]*user.Grant, 0, len(accessRaw))
+	seen := make(map[string]bool, len(accessRaw))
+	for _, accessLine := range accessRaw {
+		parts := strings.Split(accessLine, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid auth-ldap-access: %s, expected format: 'topic:permission'", accessLine)
+		}
+		topic := strings.TrimSpace(parts[0])
+		if !user.AllowedTopicPattern(topic) {
+			return nil, fmt.Errorf("invalid auth-ldap-access: %s, topic pattern %s invalid", accessLine, topic)
+		}
+		// Reject duplicate topics: the reconcile insert is DO-NOTHING-on-conflict, so a second entry
+		// for the same topic would be silently dropped rather than override the first.
+		if seen[topic] {
+			return nil, fmt.Errorf("invalid auth-ldap-access: %s, topic %s is listed more than once", accessLine, topic)
+		}
+		seen[topic] = true
+		permission, err := user.ParsePermission(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid auth-ldap-access: %s, permission %s invalid, %s", accessLine, parts[1], err.Error())
+		}
+		grants = append(grants, &user.Grant{
+			TopicPattern: topic,
+			Permission:   permission,
+		})
+	}
+	return grants, nil
 }
 
 func parseTokens(users []*user.User, tokensRaw []string) (map[string][]*user.Token, error) {

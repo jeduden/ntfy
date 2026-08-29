@@ -170,11 +170,34 @@ type Billing struct {
 	StripeSubscriptionCancelAt  time.Time
 }
 
+// Access-control provenance values stored in user_access.source. They determine a row's lifecycle:
+// which subsystem is allowed to sweep and rebuild it, so declarative policy and runtime data never
+// clobber each other.
+const (
+	accessSourceManual = "manual" // Created at runtime (CLI/API/reservation); never auto-swept
+	accessSourceConfig = "config" // Declared in auth-access; swept+rebuilt globally on startup reconcile
+	accessSourceLDAP   = "ldap"   // Declared in auth-ldap-access; reconciled per external user on login
+)
+
 // Grant is a struct that represents an access control entry to a topic by a user
 type Grant struct {
 	TopicPattern string // May include wildcard (*)
 	Permission   Permission
-	Provisioned  bool // Whether the grant was provisioned by the config file
+	Provisioned  bool   // Whether the grant is declaratively managed (source 'config' or 'ldap'), not hand-made
+	Source       string // Provenance for display: 'manual', 'config', or 'ldap'; empty for grants not read from the DB
+}
+
+// SourceLabel returns a human-readable provenance label for a grant read from the database, or the
+// empty string for a manual grant (which needs no annotation).
+func (g *Grant) SourceLabel() string {
+	switch g.Source {
+	case accessSourceConfig:
+		return "server config"
+	case accessSourceLDAP:
+		return "LDAP config"
+	default:
+		return ""
+	}
 }
 
 // Reservation is a struct that represents the ownership over a topic by a user
@@ -348,6 +371,7 @@ type queries struct {
 	selectUsers                    string
 	selectUserCount                string
 	selectUserIDFromUsername       string
+	selectLDAPUsernames            string
 	insertUser                     string
 	updateUserPass                 string
 	updateUserRole                 string
@@ -375,7 +399,10 @@ type queries struct {
 	selectOtherAccessCount      string
 	upsertUserAccess            string
 	deleteUserAccess            string
-	deleteUserAccessProvisioned string
+	deleteUserAccessConfig      string // deletes source='config' rows (declarative auth-access reconcile)
+	deleteUserAccessLDAP        string // deletes source='ldap' rows for one user (per-user auth-ldap-access seed)
+	deleteAllLDAPAccess         string // deletes all source='ldap' rows (startup auth-ldap-access reconcile)
+	insertLDAPAccess            string // inserts one source='ldap' row, DO NOTHING on conflict with a non-ldap row
 	deleteTopicAccess           string
 	deleteAllAccess             string
 

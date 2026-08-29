@@ -307,6 +307,85 @@ func TestParseAccess_Errors(t *testing.T) {
 	}
 }
 
+func TestParseLDAPAccess_Success(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected []*user.Grant
+	}{
+		{
+			name:     "empty input",
+			input:    []string{},
+			expected: []*user.Grant{},
+		},
+		{
+			name:  "single grant",
+			input: []string{"alerts:ro"},
+			expected: []*user.Grant{
+				{TopicPattern: "alerts", Permission: user.PermissionRead},
+			},
+		},
+		{
+			name:  "multiple grants and wildcard",
+			input: []string{"alerts:ro", "myteam:rw", "team-*:read-only"},
+			expected: []*user.Grant{
+				{TopicPattern: "alerts", Permission: user.PermissionRead},
+				{TopicPattern: "myteam", Permission: user.PermissionReadWrite},
+				{TopicPattern: "team-*", Permission: user.PermissionRead},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseLDAPAccess(tt.input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestParseLDAPAccess_Errors(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		error string
+	}{
+		{
+			name:  "too few parts",
+			input: []string{"alerts"},
+			error: "invalid auth-ldap-access: alerts, expected format: 'topic:permission'",
+		},
+		{
+			name:  "too many parts",
+			input: []string{"alerts:ro:extra"},
+			error: "invalid auth-ldap-access: alerts:ro:extra, expected format: 'topic:permission'",
+		},
+		{
+			name:  "invalid topic pattern",
+			input: []string{"bad!topic:ro"},
+			error: "invalid auth-ldap-access: bad!topic:ro, topic pattern bad!topic invalid",
+		},
+		{
+			name:  "invalid permission",
+			input: []string{"alerts:bogus"},
+			error: "invalid auth-ldap-access: alerts:bogus, permission bogus invalid",
+		},
+		{
+			name:  "duplicate topic",
+			input: []string{"alerts:ro", "alerts:rw"},
+			error: "invalid auth-ldap-access: alerts:rw, topic alerts is listed more than once",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseLDAPAccess(tt.input)
+			require.Error(t, err)
+			require.Nil(t, result)
+			assert.Contains(t, err.Error(), tt.error)
+		})
+	}
+}
+
 func TestParseTokens_Success(t *testing.T) {
 	users := []*user.User{
 		{Name: "alice"},
