@@ -5,12 +5,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"heckel.io/ntfy/v2/user"
 	"heckel.io/ntfy/v2/util"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestVersion_Admin(t *testing.T) {
+func TestVersion_Public(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, databaseURL string) {
 		c := newTestConfigWithAuthFile(t, databaseURL)
 		c.BuildVersion = "1.2.3"
@@ -23,27 +24,23 @@ func TestVersion_Admin(t *testing.T) {
 		require.Nil(t, s.userManager.AddUser("phil", "phil", user.RoleAdmin, false))
 		require.Nil(t, s.userManager.AddUser("ben", "ben", user.RoleUser, false))
 
-		// Admin can access /v1/version
-		rr := request(t, s, "GET", "/v1/version", "", map[string]string{
+		assertVersion := func(rr *httptest.ResponseRecorder) {
+			require.Equal(t, 200, rr.Code)
+			var versionResponse apiVersionResponse
+			require.Nil(t, json.NewDecoder(rr.Body).Decode(&versionResponse))
+			require.Equal(t, "1.2.3", versionResponse.Version)
+			require.Equal(t, "abcdef0", versionResponse.Commit)
+			require.Equal(t, "2026-02-08T00:00:00Z", versionResponse.Date)
+		}
+
+		// /v1/version is public: admin, non-admin, and unauthenticated callers all get the build info
+		assertVersion(request(t, s, "GET", "/v1/version", "", map[string]string{
 			"Authorization": util.BasicAuth("phil", "phil"),
-		})
-		require.Equal(t, 200, rr.Code)
-
-		var versionResponse apiVersionResponse
-		require.Nil(t, json.NewDecoder(rr.Body).Decode(&versionResponse))
-		require.Equal(t, "1.2.3", versionResponse.Version)
-		require.Equal(t, "abcdef0", versionResponse.Commit)
-		require.Equal(t, "2026-02-08T00:00:00Z", versionResponse.Date)
-
-		// Non-admin user cannot access /v1/version
-		rr = request(t, s, "GET", "/v1/version", "", map[string]string{
+		}))
+		assertVersion(request(t, s, "GET", "/v1/version", "", map[string]string{
 			"Authorization": util.BasicAuth("ben", "ben"),
-		})
-		require.Equal(t, 401, rr.Code)
-
-		// Unauthenticated user cannot access /v1/version
-		rr = request(t, s, "GET", "/v1/version", "", nil)
-		require.Equal(t, 401, rr.Code)
+		}))
+		assertVersion(request(t, s, "GET", "/v1/version", "", nil))
 	})
 }
 

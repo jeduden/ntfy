@@ -582,7 +582,7 @@ func (s *Server) handleInternal(w http.ResponseWriter, r *http.Request, v *visit
 	} else if r.Method == http.MethodGet && r.URL.Path == apiHealthPath {
 		return s.handleHealth(w, r, v)
 	} else if r.Method == http.MethodGet && r.URL.Path == apiVersionPath {
-		return s.ensureAdmin(s.handleVersion)(w, r, v)
+		return s.handleVersion(w, r, v)
 	} else if r.Method == http.MethodGet && r.URL.Path == apiConfigPath {
 		return s.handleConfig(w, r, v)
 	} else if r.Method == http.MethodGet && r.URL.Path == webAppConfigPath {
