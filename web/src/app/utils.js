@@ -42,6 +42,7 @@ export const accountPasswordResetRequestUrl = (baseUrl) => `${baseUrl}/v1/accoun
 export const accountPasswordResetUrl = (baseUrl) => `${baseUrl}/v1/account/password/reset`;
 export const usersUrl = (baseUrl) => `${baseUrl}/v1/users`;
 export const usersAccessUrl = (baseUrl) => `${baseUrl}/v1/users/access`;
+export const usersTokensUrl = (baseUrl) => `${baseUrl}/v1/users/tokens`;
 
 export const validUrl = (url) => url.match(/^https?:\/\/.+/);
 

@@ -194,6 +194,44 @@ describe("AccountApi admin user management", () => {
     fetchMock.mockResolvedValue({ status: 403, json: async () => ({ error: "forbidden" }) });
     await expect(accountApi.listUsers()).rejects.toThrow();
   });
+
+  it("listUserTokens GETs /v1/users/tokens with the username query param", async () => {
+    fetchMock.mockResolvedValue(ok([{ token: "tk_1", label: "grafana" }]));
+    const result = await accountApi.listUserTokens("app user");
+    expect(result).toEqual([{ token: "tk_1", label: "grafana" }]);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users/tokens?username=app%20user"); // username is URL-encoded
+    expect(options.method).toBeUndefined();
+    expect(options.headers.Authorization).toBe("Bearer test-token");
+  });
+
+  it("createUserToken POSTs a never-expiring token when expires is 0", async () => {
+    fetchMock.mockResolvedValue(ok({ token: "tk_new" }));
+    const result = await accountApi.createUserToken("app", "grafana", 0);
+    expect(result).toEqual({ token: "tk_new" });
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users/tokens");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ username: "app", label: "grafana", expires: 0 });
+  });
+
+  it("createUserToken converts a positive expiry into an absolute unix timestamp", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); // 1767225600 seconds
+    fetchMock.mockResolvedValue(ok({ token: "tk_new" }));
+    await accountApi.createUserToken("app", "", 3600);
+    const [, options] = fetchMock.mock.calls[0];
+    expect(JSON.parse(options.body).expires).toBe(1767225600 + 3600);
+  });
+
+  it("deleteUserToken DELETEs username/token from /v1/users/tokens", async () => {
+    fetchMock.mockResolvedValue(ok());
+    await accountApi.deleteUserToken("app", "tk_1");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users/tokens");
+    expect(options.method).toBe("DELETE");
+    expect(JSON.parse(options.body)).toEqual({ username: "app", token: "tk_1" });
+  });
 });
 
 describe("AccountApi subscriptions", () => {

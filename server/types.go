@@ -193,6 +193,17 @@ type apiAccessResetRequest struct {
 	Topic    string `json:"topic"`
 }
 
+type apiUserTokenCreateRequest struct {
+	Username string  `json:"username"`
+	Label    *string `json:"label"`
+	Expires  *int64  `json:"expires"` // Unix timestamp; 0 or omitted means a never-expiring token
+}
+
+type apiUserTokenDeleteRequest struct {
+	Username string `json:"username"`
+	Token    string `json:"token"`
+}
+
 type apiAccountCreateRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`

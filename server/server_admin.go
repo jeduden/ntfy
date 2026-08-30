@@ -4,6 +4,8 @@ import (
 	"errors"
 	"heckel.io/ntfy/v2/user"
 	"net/http"
+	"net/netip"
+	"time"
 )
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request, v *visitor) error {
@@ -149,6 +151,100 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request, v *vi
 	if err := s.killUserSubscriber(u, "*"); err != nil { // FIXME super inefficient
 		return err
 	}
+	return s.writeJSON(w, newSuccessResponse())
+}
+
+// tokenToAdminResponse maps a token to the API response, blanking an unset last-origin the same way
+// the self-service GET /v1/account handler does.
+func tokenToAdminResponse(t *user.Token) *apiAccountTokenResponse {
+	var lastOrigin string
+	if t.LastOrigin != netip.IPv4Unspecified() {
+		lastOrigin = t.LastOrigin.String()
+	}
+	return &apiAccountTokenResponse{
+		Token:       t.Value,
+		Label:       t.Label,
+		LastAccess:  t.LastAccess.Unix(),
+		LastOrigin:  lastOrigin,
+		Expires:     t.Expires.Unix(),
+		Provisioned: t.Provisioned,
+	}
+}
+
+// handleUsersTokensGet lists a user's access tokens (admin-only). The username is passed as the
+// "username" query parameter, since GET requests carry no body.
+func (s *Server) handleUsersTokensGet(w http.ResponseWriter, r *http.Request, v *visitor) error {
+	username := readParam(r, "X-Username", "Username")
+	u, err := s.userManager.User(username)
+	if errors.Is(err, user.ErrUserNotFound) {
+		return errHTTPBadRequestUserNotFound
+	} else if err != nil {
+		return err
+	}
+	tokens, err := s.userManager.Tokens(u.ID)
+	if err != nil {
+		return err
+	}
+	response := make([]*apiAccountTokenResponse, 0, len(tokens))
+	for _, t := range tokens {
+		response = append(response, tokenToAdminResponse(t))
+	}
+	return s.writeJSON(w, response)
+}
+
+// handleUsersTokensCreate creates an access token for another user (admin-only) and returns it,
+// including the token value, so an admin can provision a service/app publisher without knowing that
+// user's password. An omitted or zero "expires" creates a never-expiring token.
+func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request, v *visitor) error {
+	req, err := readJSONWithLimit[apiUserTokenCreateRequest](r.Body, jsonBodyBytesLimit, false)
+	if err != nil {
+		return err
+	}
+	u, err := s.userManager.User(req.Username)
+	if errors.Is(err, user.ErrUserNotFound) {
+		return errHTTPBadRequestUserNotFound
+	} else if err != nil {
+		return err
+	}
+	var label string
+	if req.Label != nil {
+		label = *req.Label
+	}
+	// Default to a never-expiring token (Unix 0): the WHERE clause treats expires=0 as "no expiry",
+	// which is what an app/service publisher wants.
+	expires := time.Unix(0, 0)
+	if req.Expires != nil {
+		expires = time.Unix(*req.Expires, 0)
+	}
+	token, err := s.userManager.CreateToken(u.ID, label, expires, netip.IPv4Unspecified(), false)
+	if err != nil {
+		return err
+	}
+	logvr(v, r).Tag(tagAccount).Field("target_user_name", u.Name).Debug("Admin created token for user %s", u.Name)
+	return s.writeJSON(w, tokenToAdminResponse(token))
+}
+
+// handleUsersTokensDelete deletes one of a user's access tokens (admin-only).
+func (s *Server) handleUsersTokensDelete(w http.ResponseWriter, r *http.Request, v *visitor) error {
+	req, err := readJSONWithLimit[apiUserTokenDeleteRequest](r.Body, jsonBodyBytesLimit, false)
+	if err != nil {
+		return err
+	} else if req.Token == "" {
+		return errHTTPBadRequestNoTokenProvided
+	}
+	u, err := s.userManager.User(req.Username)
+	if errors.Is(err, user.ErrUserNotFound) {
+		return errHTTPBadRequestUserNotFound
+	} else if err != nil {
+		return err
+	}
+	if err := s.userManager.RemoveToken(u.ID, req.Token); err != nil {
+		if errors.Is(err, user.ErrProvisionedTokenChange) {
+			return errHTTPConflictProvisionedTokenChange
+		}
+		return err
+	}
+	logvr(v, r).Tag(tagAccount).Field("target_user_name", u.Name).Debug("Admin deleted token for user %s", u.Name)
 	return s.writeJSON(w, newSuccessResponse())
 }
 

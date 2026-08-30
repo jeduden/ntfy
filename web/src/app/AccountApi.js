@@ -21,6 +21,7 @@ import {
   maybeWithBearerAuth,
   tiersUrl,
   usersAccessUrl,
+  usersTokensUrl,
   usersUrl,
   withBasicAuth,
   withBearerAuth,
@@ -225,6 +226,42 @@ class AccountApi {
       method: "DELETE",
       headers: withBearerAuth({}, session.token()),
       body: JSON.stringify({ username }),
+    });
+  }
+
+  async listUserTokens(username) {
+    const url = `${usersTokensUrl(config.base_url)}?username=${encodeURIComponent(username)}`;
+    console.log(`[AccountApi] Listing tokens for user ${username}`);
+    const response = await fetchOrThrow(url, {
+      headers: withBearerAuth({}, session.token()),
+    });
+    return response.json(); // May throw SyntaxError; array of apiAccountTokenResponse
+  }
+
+  // Admin-creates a token for another user and returns it (including the token value). A null/0
+  // expires creates a never-expiring token, suitable for a service/app publisher.
+  async createUserToken(username, label, expires) {
+    const url = usersTokensUrl(config.base_url);
+    console.log(`[AccountApi] Creating token for user ${username}`);
+    const response = await fetchOrThrow(url, {
+      method: "POST",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({
+        username,
+        label: label || "",
+        expires: expires > 0 ? Math.floor(Date.now() / 1000) + expires : 0,
+      }),
+    });
+    return response.json(); // May throw SyntaxError
+  }
+
+  async deleteUserToken(username, token) {
+    const url = usersTokensUrl(config.base_url);
+    console.log(`[AccountApi] Deleting token for user ${username}`);
+    await fetchOrThrow(url, {
+      method: "DELETE",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({ username, token }),
     });
   }
 

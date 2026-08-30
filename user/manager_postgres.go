@@ -200,7 +200,7 @@ const (
 			SELECT user_id, token
 			FROM user_token
 			WHERE user_id = $2
-			ORDER BY expires DESC
+			ORDER BY (expires = 0) DESC, expires DESC
 			LIMIT $3
 		)
 	`

@@ -37,6 +37,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import AddIcon from "@mui/icons-material/Add";
 import CloseIcon from "@mui/icons-material/Close";
+import ContentCopy from "@mui/icons-material/ContentCopy";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import routes from "./routes";
@@ -46,6 +47,8 @@ import { UnauthorizedError } from "../app/errors";
 import AccountContext from "./AccountContext";
 import DialogFooter from "./DialogFooter";
 import { Paragraph } from "./styles";
+import { copyToClipboard, formatDateTime } from "../app/utils";
+import { usePrefCache } from "./PrefCache";
 
 // Admin-only user management page (fork feature). Drives the /v1/users and
 // /v1/users/access admin API (see server/server_admin.go). The API cannot set the
@@ -218,6 +221,7 @@ const UsersTable = ({ users, onChange, onError }) => {
                 <TableCell sx={{ paddingBottom: 0, paddingTop: 0, paddingLeft: 0 }} colSpan={6}>
                   <Collapse in={isOpen} timeout="auto" unmountOnExit>
                     <GrantsEditor user={user} onChange={onChange} onError={onError} />
+                    <TokensEditor user={user} onError={onError} />
                   </Collapse>
                 </TableCell>
               </TableRow>
@@ -334,6 +338,180 @@ const GrantsEditor = ({ user, onChange, onError }) => {
         </TableBody>
       </Table>
     </Box>
+  );
+};
+
+const TokensEditor = ({ user, onError }) => {
+  const { t } = useTranslation();
+  const { dateFormat, timeFormat } = usePrefCache();
+  const [tokens, setTokens] = useState(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogKey, setDialogKey] = useState(0);
+  const [snackOpen, setSnackOpen] = useState(false);
+
+  const reload = async () => {
+    try {
+      setTokens(await accountApi.listUserTokens(user.username));
+    } catch (e) {
+      console.log(`[Users] Error loading tokens`, e);
+      if (e instanceof UnauthorizedError) {
+        await session.resetAndRedirect(routes.login);
+      } else {
+        onError(e.message);
+      }
+    }
+  };
+
+  useEffect(() => {
+    reload();
+  }, []);
+
+  const handleCopy = (token) => {
+    copyToClipboard(token);
+    setSnackOpen(true);
+  };
+
+  const handleDelete = async (token) => {
+    try {
+      await accountApi.deleteUserToken(user.username, token);
+      await reload();
+    } catch (e) {
+      console.log(`[Users] Error deleting token`, e);
+      if (e instanceof UnauthorizedError) {
+        await session.resetAndRedirect(routes.login);
+      } else {
+        onError(e.message);
+      }
+    }
+  };
+
+  const list = tokens || [];
+
+  return (
+    <Box sx={{ margin: 1, mb: 2 }}>
+      <Typography variant="subtitle2" gutterBottom>
+        {t("admin_users_tokens_title")}
+      </Typography>
+      <Table size="small" aria-label={t("admin_users_tokens_title")}>
+        <TableBody>
+          {list.length === 0 && (
+            <TableRow>
+              <TableCell sx={{ paddingLeft: 0 }} colSpan={4}>
+                <em>{t("admin_users_tokens_none")}</em>
+              </TableCell>
+            </TableRow>
+          )}
+          {list.map((token) => (
+            <TableRow key={token.token}>
+              <TableCell sx={{ paddingLeft: 0, whiteSpace: "nowrap" }}>
+                <span style={{ fontFamily: "Monospace", fontSize: "0.9rem" }}>{token.token.slice(0, 12)}</span>…
+                <Tooltip title={t("admin_users_tokens_copy")} placement="right">
+                  <IconButton size="small" onClick={() => handleCopy(token.token)} aria-label={t("admin_users_tokens_copy")}>
+                    <ContentCopy fontSize="inherit" />
+                  </IconButton>
+                </Tooltip>
+              </TableCell>
+              <TableCell>{token.label || "-"}</TableCell>
+              <TableCell sx={{ whiteSpace: "nowrap" }}>
+                {token.expires ? formatDateTime(token.expires, dateFormat, timeFormat) : <em>{t("admin_users_tokens_never_expires")}</em>}
+              </TableCell>
+              <TableCell align="right" sx={{ width: 48 }}>
+                {token.provisioned ? (
+                  <Tooltip title={t("admin_users_tokens_provisioned")}>
+                    <span>
+                      <IconButton size="small" disabled>
+                        <DeleteOutlineIcon fontSize="inherit" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <Tooltip title={t("admin_users_tokens_delete")}>
+                    <IconButton size="small" onClick={() => handleDelete(token.token)} aria-label={t("admin_users_tokens_delete")}>
+                      <DeleteOutlineIcon fontSize="inherit" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <Button
+        size="small"
+        startIcon={<AddIcon />}
+        onClick={() => {
+          setDialogKey((prev) => prev + 1);
+          setDialogOpen(true);
+        }}
+      >
+        {t("admin_users_tokens_create")}
+      </Button>
+      <TokenCreateDialog
+        key={`userTokenCreate${dialogKey}`}
+        open={dialogOpen}
+        username={user.username}
+        onClose={() => setDialogOpen(false)}
+        onCreated={reload}
+        onError={onError}
+      />
+      <Portal>
+        <Snackbar open={snackOpen} autoHideDuration={3000} onClose={() => setSnackOpen(false)} message={t("admin_users_tokens_copied")} />
+      </Portal>
+    </Box>
+  );
+};
+
+const TokenCreateDialog = (props) => {
+  const theme = useTheme();
+  const { t } = useTranslation();
+  const [error, setError] = useState("");
+  const [label, setLabel] = useState("");
+  const [expires, setExpires] = useState(0); // 0 = never expires (long-lived), suitable for an app
+  const fullScreen = useMediaQuery(theme.breakpoints.down("sm"));
+
+  const handleSubmit = async () => {
+    try {
+      await accountApi.createUserToken(props.username, label, expires);
+      await props.onCreated();
+      props.onClose();
+    } catch (e) {
+      console.log(`[Users] Error creating token`, e);
+      if (e instanceof UnauthorizedError) {
+        await session.resetAndRedirect(routes.login);
+      } else {
+        setError(e.message);
+      }
+    }
+  };
+
+  return (
+    <Dialog open={props.open} onClose={props.onClose} maxWidth="sm" fullWidth fullScreen={fullScreen}>
+      <DialogTitle>{t("admin_users_tokens_dialog_title", { username: props.username })}</DialogTitle>
+      <DialogContent>
+        <TextField
+          autoFocus
+          margin="dense"
+          label={t("admin_users_tokens_dialog_label")}
+          type="text"
+          value={label}
+          onChange={(ev) => setLabel(ev.target.value)}
+          fullWidth
+          variant="standard"
+        />
+        <FormControl fullWidth variant="standard" sx={{ mt: 1 }}>
+          <Select value={expires} onChange={(ev) => setExpires(ev.target.value)} aria-label={t("admin_users_tokens_dialog_expires")}>
+            <MenuItem value={0}>{t("admin_users_tokens_dialog_expires_never")}</MenuItem>
+            <MenuItem value={2592000}>{t("admin_users_tokens_dialog_expires_x_days", { days: 30 })}</MenuItem>
+            <MenuItem value={7776000}>{t("admin_users_tokens_dialog_expires_x_days", { days: 90 })}</MenuItem>
+            <MenuItem value={15552000}>{t("admin_users_tokens_dialog_expires_x_days", { days: 180 })}</MenuItem>
+          </Select>
+        </FormControl>
+      </DialogContent>
+      <DialogFooter status={error}>
+        <Button onClick={props.onClose}>{t("admin_users_dialog_button_cancel")}</Button>
+        <Button onClick={handleSubmit}>{t("admin_users_tokens_dialog_button_create")}</Button>
+      </DialogFooter>
+    </Dialog>
   );
 };
 

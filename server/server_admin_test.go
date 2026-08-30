@@ -6,6 +6,7 @@ import (
 	"heckel.io/ntfy/v2/user"
 	"heckel.io/ntfy/v2/util"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,6 +100,77 @@ func TestUser_AddRemove(t *testing.T) {
 			"Authorization": util.BasicAuth("phil", "phil"),
 		})
 		require.Equal(t, 400, rr.Code)
+	})
+}
+
+func TestUsersTokens_Admin(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		s := newTestServer(t, newTestConfigWithAuthFile(t, databaseURL))
+		defer s.closeDatabases()
+
+		// Admin creates a token for another user (who never logs in), and the response reveals it
+		require.Nil(t, s.userManager.AddUser("phil", "phil", user.RoleAdmin, false))
+		require.Nil(t, s.userManager.AddUser("app", "app", user.RoleUser, false))
+
+		// Create a never-expiring token for "app" (no expires field => long-lived)
+		rr := request(t, s, "POST", "/v1/users/tokens", `{"username":"app","label":"grafana"}`, map[string]string{
+			"Authorization": util.BasicAuth("phil", "phil"),
+		})
+		require.Equal(t, 200, rr.Code)
+		var created apiAccountTokenResponse
+		require.Nil(t, json.NewDecoder(rr.Body).Decode(&created))
+		require.True(t, strings.HasPrefix(created.Token, "tk_"))
+		require.Equal(t, "grafana", created.Label)
+		require.Equal(t, int64(0), created.Expires) // 0 == never expires
+
+		// The token actually authenticates as "app"
+		u, err := s.userManager.AuthenticateToken(created.Token)
+		require.Nil(t, err)
+		require.Equal(t, "app", u.Name)
+
+		// Admin lists the user's tokens and sees the created one (with its value)
+		rr = request(t, s, "GET", "/v1/users/tokens?username=app", "", map[string]string{
+			"Authorization": util.BasicAuth("phil", "phil"),
+		})
+		require.Equal(t, 200, rr.Code)
+		var list []apiAccountTokenResponse
+		require.Nil(t, json.NewDecoder(rr.Body).Decode(&list))
+		require.Len(t, list, 1)
+		require.Equal(t, created.Token, list[0].Token)
+
+		// Admin deletes the token
+		rr = request(t, s, "DELETE", "/v1/users/tokens", `{"username":"app","token":"`+created.Token+`"}`, map[string]string{
+			"Authorization": util.BasicAuth("phil", "phil"),
+		})
+		require.Equal(t, 200, rr.Code)
+		_, err = s.userManager.AuthenticateToken(created.Token)
+		require.Equal(t, user.ErrUnauthenticated, err)
+
+		// Creating a token for an unknown user is a 400
+		rr = request(t, s, "POST", "/v1/users/tokens", `{"username":"nope"}`, map[string]string{
+			"Authorization": util.BasicAuth("phil", "phil"),
+		})
+		require.Equal(t, 400, rr.Code)
+	})
+}
+
+func TestUsersTokens_NotAdminForbidden(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		s := newTestServer(t, newTestConfigWithAuthFile(t, databaseURL))
+		defer s.closeDatabases()
+
+		require.Nil(t, s.userManager.AddUser("ben", "ben", user.RoleUser, false))
+		require.Nil(t, s.userManager.AddUser("app", "app", user.RoleUser, false))
+
+		// A regular user cannot mint tokens for others
+		rr := request(t, s, "POST", "/v1/users/tokens", `{"username":"app"}`, map[string]string{
+			"Authorization": util.BasicAuth("ben", "ben"),
+		})
+		require.Equal(t, 401, rr.Code)
+
+		// Neither can an anonymous caller
+		rr = request(t, s, "GET", "/v1/users/tokens?username=app", "", nil)
+		require.Equal(t, 401, rr.Code)
 	})
 }
 

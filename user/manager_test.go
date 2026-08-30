@@ -297,6 +297,42 @@ func TestManager_CreateToken_Only_Lower(t *testing.T) {
 	})
 }
 
+func TestManager_CreateToken_NeverExpiringSurvivesPruning(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, newManager newManagerFunc) {
+		a := newTestManager(t, newManager, PermissionDenyAll)
+		require.Nil(t, a.AddUser("app", "pass", RoleUser, false))
+		u, err := a.User("app")
+		require.Nil(t, err)
+
+		// Fill the token table to the per-user max, all with distinct FUTURE expiries.
+		var earliest string
+		for i := 0; i < tokenMaxCount; i++ {
+			tk, err := a.CreateToken(u.ID, "", time.Now().Add(time.Duration(i+1)*time.Hour), netip.IPv4Unspecified(), false)
+			require.Nil(t, err)
+			if i == 0 {
+				earliest = tk.Value // soonest-expiring token
+			}
+		}
+
+		// One more token that never expires (expires=0) — this exceeds the max and triggers pruning.
+		never, err := a.CreateToken(u.ID, "app", time.Unix(0, 0), netip.IPv4Unspecified(), false)
+		require.Nil(t, err)
+
+		// The never-expiring token must be KEPT (it is the most valuable), and the soonest-expiring one
+		// pruned instead. Regression test: expires=0 sorts lowest under a plain ORDER BY expires DESC.
+		got, err := a.Token(u.ID, never.Value)
+		require.Nil(t, err)
+		require.Equal(t, never.Value, got.Value)
+
+		_, err = a.Token(u.ID, earliest)
+		require.Equal(t, ErrTokenNotFound, err)
+
+		tokens, err := a.Tokens(u.ID)
+		require.Nil(t, err)
+		require.Len(t, tokens, tokenMaxCount)
+	})
+}
+
 func TestManager_UserManagement(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, newManager newManagerFunc) {
 		a := newTestManager(t, newManager, PermissionDenyAll)
