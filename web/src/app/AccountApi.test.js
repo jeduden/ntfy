@@ -130,6 +130,72 @@ describe("AccountApi.deleteToken", () => {
   });
 });
 
+describe("AccountApi admin user management", () => {
+  it("listUsers GETs /v1/users with the bearer token and returns the parsed list", async () => {
+    const users = [{ username: "phil", role: "admin", tier: "", grants: [] }];
+    fetchMock.mockResolvedValue(ok(users));
+
+    const result = await accountApi.listUsers();
+
+    expect(result).toEqual(users);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users");
+    expect(options.method).toBeUndefined(); // GET is the fetch default
+    expect(options.headers.Authorization).toBe("Bearer test-token");
+  });
+
+  it("addUser POSTs username/password/tier, defaulting the missing fields to empty strings", async () => {
+    fetchMock.mockResolvedValue(ok());
+    await accountApi.addUser("newuser", "pw");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ username: "newuser", password: "pw", tier: "" });
+  });
+
+  it("updateUser PUTs the username with the given password and tier", async () => {
+    fetchMock.mockResolvedValue(ok());
+    await accountApi.updateUser("phil", "", "pro");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users");
+    expect(options.method).toBe("PUT");
+    expect(JSON.parse(options.body)).toEqual({ username: "phil", password: "", tier: "pro" });
+  });
+
+  it("deleteUser DELETEs with the username in the JSON body", async () => {
+    fetchMock.mockResolvedValue(ok());
+    await accountApi.deleteUser("phil");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users");
+    expect(options.method).toBe("DELETE");
+    expect(JSON.parse(options.body)).toEqual({ username: "phil" });
+    expect(options.headers.Authorization).toBe("Bearer test-token");
+  });
+
+  it("allowUserAccess PUTs username/topic/permission to /v1/users/access", async () => {
+    fetchMock.mockResolvedValue(ok());
+    await accountApi.allowUserAccess("phil", "alerts", "read-only");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users/access");
+    expect(options.method).toBe("PUT");
+    expect(JSON.parse(options.body)).toEqual({ username: "phil", topic: "alerts", permission: "read-only" });
+  });
+
+  it("resetUserAccess DELETEs username/topic from /v1/users/access", async () => {
+    fetchMock.mockResolvedValue(ok());
+    await accountApi.resetUserAccess("phil", "alerts");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://ntfy.sh/v1/users/access");
+    expect(options.method).toBe("DELETE");
+    expect(JSON.parse(options.body)).toEqual({ username: "phil", topic: "alerts" });
+  });
+
+  it("propagates errors from a non-200 response (e.g. non-admin caller)", async () => {
+    fetchMock.mockResolvedValue({ status: 403, json: async () => ({ error: "forbidden" }) });
+    await expect(accountApi.listUsers()).rejects.toThrow();
+  });
+});
+
 describe("AccountApi subscriptions", () => {
   it("addSubscription POSTs base_url/topic and returns the parsed subscription", async () => {
     fetchMock.mockResolvedValue(ok({ id: "sub_1" }));
