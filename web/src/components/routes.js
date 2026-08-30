@@ -6,6 +6,7 @@ const routes = {
   login: "/login",
   signup: "/signup",
   account: "/account",
+  users: "/account/users",
   settings: "/settings",
   passwordResetRequest: "/reset-password",
   passwordReset: "/account/password/reset/:token",

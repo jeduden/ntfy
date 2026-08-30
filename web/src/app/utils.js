@@ -40,6 +40,8 @@ export const accountEmailPrimaryUrl = (baseUrl) => `${baseUrl}/v1/account/email/
 export const accountEmailResendUrl = (baseUrl) => `${baseUrl}/v1/account/email/resend`;
 export const accountPasswordResetRequestUrl = (baseUrl) => `${baseUrl}/v1/account/password/reset/request`;
 export const accountPasswordResetUrl = (baseUrl) => `${baseUrl}/v1/account/password/reset`;
+export const usersUrl = (baseUrl) => `${baseUrl}/v1/users`;
+export const usersAccessUrl = (baseUrl) => `${baseUrl}/v1/users/access`;
 
 export const validUrl = (url) => url.match(/^https?:\/\/.+/);
 

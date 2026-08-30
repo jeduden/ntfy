@@ -20,6 +20,8 @@ import {
   accountUrl,
   maybeWithBearerAuth,
   tiersUrl,
+  usersAccessUrl,
+  usersUrl,
   withBasicAuth,
   withBearerAuth,
 } from "./utils";
@@ -173,6 +175,76 @@ class AccountApi {
     await fetchOrThrow(url, {
       method: "DELETE",
       headers: withBearerAuth({ "X-Token": token }, session.token()),
+    });
+  }
+
+  // Admin-only user management (fork feature). Backed by /v1/users and /v1/users/access
+  // in server/server_admin.go; all endpoints require the caller to be an admin.
+
+  async listUsers() {
+    const url = usersUrl(config.base_url);
+    console.log(`[AccountApi] Listing users ${url}`);
+    const response = await fetchOrThrow(url, {
+      headers: withBearerAuth({}, session.token()),
+    });
+    return response.json(); // May throw SyntaxError; array of {username, role, tier, grants:[{topic, permission}]}
+  }
+
+  async addUser(username, password, tier) {
+    const url = usersUrl(config.base_url);
+    console.log(`[AccountApi] Adding user ${username}`);
+    await fetchOrThrow(url, {
+      method: "POST",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({
+        username,
+        password: password || "",
+        tier: tier || "",
+      }),
+    });
+  }
+
+  async updateUser(username, password, tier) {
+    const url = usersUrl(config.base_url);
+    console.log(`[AccountApi] Updating user ${username}`);
+    await fetchOrThrow(url, {
+      method: "PUT",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({
+        username,
+        password: password || "",
+        tier: tier || "",
+      }),
+    });
+  }
+
+  async deleteUser(username) {
+    const url = usersUrl(config.base_url);
+    console.log(`[AccountApi] Deleting user ${username}`);
+    await fetchOrThrow(url, {
+      method: "DELETE",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({ username }),
+    });
+  }
+
+  async allowUserAccess(username, topic, permission) {
+    const url = usersAccessUrl(config.base_url);
+    console.log(`[AccountApi] Granting ${permission} on ${topic} to ${username}`);
+    await fetchOrThrow(url, {
+      method: "PUT",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({ username, topic, permission }),
+    });
+  }
+
+  async resetUserAccess(username, topic) {
+    const url = usersAccessUrl(config.base_url);
+    console.log(`[AccountApi] Resetting access to ${topic} for ${username}`);
+    await fetchOrThrow(url, {
+      method: "DELETE",
+      headers: withBearerAuth({}, session.token()),
+      body: JSON.stringify({ username, topic }),
     });
   }
 

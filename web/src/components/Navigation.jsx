@@ -24,6 +24,7 @@ import * as React from "react";
 import { useContext, useState } from "react";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutlineOutlined";
 import Person from "@mui/icons-material/Person";
+import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import SettingsIcon from "@mui/icons-material/Settings";
 import AddIcon from "@mui/icons-material/Add";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -175,6 +176,14 @@ const NavList = (props) => {
               <Person />
             </ListItemIcon>
             <ListItemText primary={t("nav_button_account")} />
+          </ListItemButton>
+        )}
+        {session.exists() && isAdmin && (
+          <ListItemButton onClick={() => navigate(routes.users)} selected={location.pathname === routes.users}>
+            <ListItemIcon>
+              <ManageAccountsIcon />
+            </ListItemIcon>
+            <ListItemText primary={t("nav_button_users")} />
           </ListItemButton>
         )}
         <ListItemButton onClick={() => navigate(routes.settings)} selected={location.pathname === routes.settings}>
