@@ -142,6 +142,7 @@ type Config struct {
 	AuthLDAPStartTLS                     bool          // Issue StartTLS on a plain ldap:// connection before binding
 	AuthLDAPDefaultRole                  string        // Role assigned to LDAP users on first login ("user" or "admin")
 	AuthLDAPAccess                       []*user.Grant // Topic ACL grants seeded for an LDAP user on first login (when its shadow row is created)
+	AuthLDAPAdmins                       []string      // LDAP usernames granted the admin role (reconciled on login/startup); others get AuthLDAPDefaultRole
 	AttachmentCacheDir                   string
 	AttachmentTotalSizeLimit             int64
 	AttachmentFileSizeLimit              int64

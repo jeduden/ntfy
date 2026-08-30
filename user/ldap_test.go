@@ -285,6 +285,78 @@ func TestManager_Authenticate_LDAP_EmptyConfigSweepsLDAPGrantsAtStartup(t *testi
 	})
 }
 
+func TestLDAPConfig_RoleFor(t *testing.T) {
+	// No default role set: listed usernames are admin, everyone else falls back to RoleUser.
+	c := &LDAPConfig{Admins: []string{"alice", "bob"}}
+	require.Equal(t, RoleAdmin, c.RoleFor("alice"))
+	require.Equal(t, RoleAdmin, c.RoleFor("bob"))
+	require.Equal(t, RoleUser, c.RoleFor("carol"))
+
+	// DefaultRole applies to unlisted users; the admins list still wins for listed ones.
+	c2 := &LDAPConfig{DefaultRole: RoleAdmin}
+	require.Equal(t, RoleAdmin, c2.RoleFor("anyone"))
+	c3 := &LDAPConfig{DefaultRole: RoleUser, Admins: []string{"dave"}}
+	require.Equal(t, RoleAdmin, c3.RoleFor("dave"))
+	require.Equal(t, RoleUser, c3.RoleFor("erin"))
+}
+
+func TestManager_Authenticate_LDAP_AdminOnFirstLogin(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, newManager newManagerFunc) {
+		a := newTestManager(t, newManager, PermissionDenyAll)
+		a.config.LDAP = &LDAPConfig{Admins: []string{"boss"}}
+		a.ldap = &fakeLDAP{creds: map[string]string{"boss": "pw", "phil": "secret"}}
+
+		// A listed username is created as an admin on first login...
+		boss, err := a.Authenticate("boss", "pw")
+		require.Nil(t, err)
+		require.Equal(t, RoleAdmin, boss.Role)
+
+		// ...while an unlisted one gets the default role.
+		phil, err := a.Authenticate("phil", "secret")
+		require.Nil(t, err)
+		require.Equal(t, RoleUser, phil.Role)
+	})
+}
+
+func TestManager_Authenticate_LDAP_RolesReconciledAtStartup(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, newManager newManagerFunc) {
+		a := newTestManager(t, newManager, PermissionDenyAll)
+		a.config.LDAP = &LDAPConfig{Access: []Grant{{TopicPattern: "alerts", Permission: PermissionRead}}}
+		a.ldap = &fakeLDAP{creds: map[string]string{"phil": "secret"}}
+
+		// First login: a regular user with a seeded ldap grant.
+		u, err := a.Authenticate("phil", "secret")
+		require.Nil(t, err)
+		require.Equal(t, RoleUser, u.Role)
+		grants, err := a.Grants("phil")
+		require.Nil(t, err)
+		require.Len(t, grants, 1)
+
+		// Config lists phil as an admin (takes effect on restart): the reconcile promotes him and,
+		// like ChangeRole, drops the now-unneeded ACL rows.
+		a.config.LDAP.Admins = []string{"phil"}
+		require.Nil(t, a.maybeReconcileLDAPRoles())
+		u, err = a.userByNameOrEmail("phil")
+		require.Nil(t, err)
+		require.Equal(t, RoleAdmin, u.Role)
+		grants, err = a.Grants("phil")
+		require.Nil(t, err)
+		require.Len(t, grants, 0)
+
+		// Removing phil from the config demotes him to the default role on the next restart. The
+		// access reconcile runs first at startup and re-seeds his ldap grant, which the demotion keeps.
+		a.config.LDAP.Admins = nil
+		require.Nil(t, a.maybeReconcileLDAPAccess())
+		require.Nil(t, a.maybeReconcileLDAPRoles())
+		u, err = a.userByNameOrEmail("phil")
+		require.Nil(t, err)
+		require.Equal(t, RoleUser, u.Role)
+		grants, err = a.Grants("phil")
+		require.Nil(t, err)
+		require.Len(t, grants, 1)
+	})
+}
+
 func TestManager_Authorize_ManualGrantBeatsLDAPAtEqualLength(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, newManager newManagerFunc) {
 		// Writer (cache ON), LDAP configured: first login seeds alerts:rw as source='ldap'.

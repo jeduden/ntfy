@@ -96,6 +96,9 @@ func newManager(d *db.DB, queries queries, config *Config) (*Manager, error) {
 	if err := manager.maybeReconcileLDAPAccess(); err != nil {
 		return nil, err
 	}
+	if err := manager.maybeReconcileLDAPRoles(); err != nil {
+		return nil, err
+	}
 	if config.AccessCacheEnabled {
 		manager.accessCache = newAccessCache()
 		if err := manager.maybeReloadAccessCache(); err != nil {
@@ -266,8 +269,8 @@ func (a *Manager) authenticateLDAP(identifier, password string, existing *User) 
 // written here; reconcileLDAPAccess owns the user's source='ldap' rows.
 func (a *Manager) addLDAPUser(username string) error {
 	role := RoleUser
-	if a.config.LDAP != nil && a.config.LDAP.DefaultRole != "" {
-		role = a.config.LDAP.DefaultRole
+	if a.config.LDAP != nil {
+		role = a.config.LDAP.RoleFor(username)
 	}
 	return db.ExecTx(a.db, func(tx *sql.Tx) error {
 		return a.addUserTx(tx, username, ldapUserPasswordHash, role, false)
@@ -332,6 +335,32 @@ func (a *Manager) maybeReconcileLDAPAccess() error {
 		}
 		for _, username := range usernames {
 			if err := a.insertLDAPGrantsTx(tx, username); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// maybeReconcileLDAPRoles makes every LDAP user's role match the current config at startup, mirroring
+// how maybeReconcileLDAPAccess rebuilds their ACL rows: auth-ldap-admins (together with
+// auth-ldap-default-role) is the source of truth, so a user listed there becomes RoleAdmin and any
+// LDAP user no longer listed is demoted back to the default role. This is what makes admin status
+// declarative and reproducible from config across restarts; a manual `ntfy user change-role` on an
+// LDAP user is therefore not preserved. Runs after maybeReconcileLDAPAccess (so a demoted user keeps
+// the ldap grants just re-seeded) and before the access cache is populated. Promotion to admin clears
+// the user's now-unneeded ACL rows via changeRoleTx, matching ChangeRole.
+func (a *Manager) maybeReconcileLDAPRoles() error {
+	if a.config.LDAP == nil {
+		return nil
+	}
+	return db.ExecTx(a.db, func(tx *sql.Tx) error {
+		usernames, err := a.ldapUsernamesTx(tx)
+		if err != nil {
+			return err
+		}
+		for _, username := range usernames {
+			if err := a.changeRoleTx(tx, username, a.config.LDAP.RoleFor(username)); err != nil {
 				return err
 			}
 		}

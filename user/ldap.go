@@ -30,6 +30,21 @@ type LDAPConfig struct {
 	DefaultRole    Role          // Role assigned to LDAP users auto-created on first successful login (defaults to RoleUser)
 	Timeout        time.Duration // Dial/bind timeout; defaults to DefaultLDAPTimeout when zero or negative
 	Access         []Grant       // Topic ACL grants seeded for an LDAP user when its shadow row is created on first login
+	Admins         []string      // LDAP usernames granted RoleAdmin; reconciled on login and at startup. Others get DefaultRole
+}
+
+// RoleFor returns the role an LDAP user with the given username should have per this config:
+// RoleAdmin when the username is listed in Admins, otherwise DefaultRole (RoleUser when unset).
+func (c *LDAPConfig) RoleFor(username string) Role {
+	for _, admin := range c.Admins {
+		if admin == username {
+			return RoleAdmin
+		}
+	}
+	if c.DefaultRole != "" {
+		return c.DefaultRole
+	}
+	return RoleUser
 }
 
 // ldapAuther verifies a username/password pair against an external LDAP server. It is an

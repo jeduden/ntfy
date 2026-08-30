@@ -280,6 +280,7 @@ func New(conf *Config) (*Server, error) {
 				StartTLS:       conf.AuthLDAPStartTLS,
 				DefaultRole:    user.Role(conf.AuthLDAPDefaultRole),
 				Access:         ldapAccess,
+				Admins:         conf.AuthLDAPAdmins,
 			}
 		}
 		if pool != nil {

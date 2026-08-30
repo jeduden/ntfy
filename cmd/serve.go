@@ -60,6 +60,7 @@ var flagsServe = append(
 	altsrc.NewBoolFlag(&cli.BoolFlag{Name: "auth-ldap-start-tls", Aliases: []string{"auth_ldap_start_tls"}, EnvVars: []string{"NTFY_AUTH_LDAP_START_TLS"}, Usage: "issue StartTLS on a plain ldap:// connection before binding"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "auth-ldap-default-role", Aliases: []string{"auth_ldap_default_role"}, EnvVars: []string{"NTFY_AUTH_LDAP_DEFAULT_ROLE"}, Value: "user", Usage: "role assigned to LDAP users on first login (user or admin)"}),
 	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "auth-ldap-access", Aliases: []string{"auth_ldap_access"}, EnvVars: []string{"NTFY_AUTH_LDAP_ACCESS"}, Usage: "topic:permission ACL grants seeded for an LDAP user on first login"}),
+	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "auth-ldap-admins", Aliases: []string{"auth_ldap_admins"}, EnvVars: []string{"NTFY_AUTH_LDAP_ADMINS"}, Usage: "LDAP usernames granted the admin role (reconciled on login and at startup)"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-cache-dir", Aliases: []string{"attachment_cache_dir"}, EnvVars: []string{"NTFY_ATTACHMENT_CACHE_DIR"}, Usage: "cache directory for attached files, or S3 URL (s3://ACCESS_KEY:SECRET_KEY@BUCKET[/PREFIX]?region=REGION[&endpoint=ENDPOINT])"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-total-size-limit", Aliases: []string{"attachment_total_size_limit", "A"}, EnvVars: []string{"NTFY_ATTACHMENT_TOTAL_SIZE_LIMIT"}, Value: util.FormatSize(server.DefaultAttachmentTotalSizeLimit), Usage: "limit of the on-disk attachment cache"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "attachment-file-size-limit", Aliases: []string{"attachment_file_size_limit", "Y"}, EnvVars: []string{"NTFY_ATTACHMENT_FILE_SIZE_LIMIT"}, Value: util.FormatSize(server.DefaultAttachmentFileSizeLimit), Usage: "per-file attachment size limit (e.g. 300k, 2M, 100M)"}),
@@ -186,6 +187,7 @@ func execServe(c *cli.Context) error {
 	authLDAPStartTLS := c.Bool("auth-ldap-start-tls")
 	authLDAPDefaultRole := c.String("auth-ldap-default-role")
 	authLDAPAccessRaw := c.StringSlice("auth-ldap-access")
+	authLDAPAdmins := c.StringSlice("auth-ldap-admins")
 	attachmentCacheDir := c.String("attachment-cache-dir")
 	attachmentTotalSizeLimitStr := c.String("attachment-total-size-limit")
 	attachmentFileSizeLimitStr := c.String("attachment-file-size-limit")
@@ -465,8 +467,15 @@ func execServe(c *cli.Context) error {
 		if authLDAPDefaultRole != string(user.RoleUser) && authLDAPDefaultRole != string(user.RoleAdmin) {
 			return errors.New("auth-ldap-default-role must be 'user' or 'admin'")
 		}
+		for _, admin := range authLDAPAdmins {
+			if !user.AllowedUsername(admin) {
+				return fmt.Errorf("invalid auth-ldap-admins: username %s invalid", admin)
+			}
+		}
 	} else if len(authLDAPAccess) > 0 {
 		return errors.New("auth-ldap-access requires auth-ldap-url to be set")
+	} else if len(authLDAPAdmins) > 0 {
+		return errors.New("auth-ldap-admins requires auth-ldap-url to be set")
 	}
 
 	// Special case: Unset default
@@ -540,6 +549,7 @@ func execServe(c *cli.Context) error {
 	conf.AuthLDAPStartTLS = authLDAPStartTLS
 	conf.AuthLDAPDefaultRole = authLDAPDefaultRole
 	conf.AuthLDAPAccess = authLDAPAccess
+	conf.AuthLDAPAdmins = authLDAPAdmins
 	conf.AttachmentCacheDir = attachmentCacheDir
 	conf.AttachmentTotalSizeLimit = attachmentTotalSizeLimit
 	conf.AttachmentFileSizeLimit = attachmentFileSizeLimit
